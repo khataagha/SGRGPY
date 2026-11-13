@@ -1,7 +1,6 @@
-# SGRGPY
-
-# Basic ignore rules for the Swift package and generated app bundle.
+# Generated Swift package outputs and macOS artifacts
 .build/
+.swiftpm/
 .DS_Store
-**/.DS_Store
+*.xcuserstate
 dist/

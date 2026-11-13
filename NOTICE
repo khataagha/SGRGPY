@@ -1,0 +1,5 @@
+# SGRGPY
+
+A minimal SwiftUI front-end for the upstream scrcpy desktop tool.
+
+This repository contains only SGRGPY's own interface and packaging code. scrcpy and adb are separate prerequisites and are not vendored here.

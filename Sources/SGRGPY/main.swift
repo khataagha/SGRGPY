@@ -1,763 +1,538 @@
-import Foundation
 import AppKit
+import Foundation
 import SwiftUI
 
-struct Profile: Identifiable, Codable, Hashable {
-    var id: UUID = UUID()
+// SGRGPY is a native front-end for the upstream scrcpy executable. scrcpy
+// remains a separately installed dependency; this app does not fork or bundle it.
+
+struct AndroidDevice: Identifiable, Hashable {
+    let serial: String
+    let details: String
+    var id: String { serial }
+}
+
+struct StreamProfile: Identifiable, Codable, Hashable {
+    var id = UUID()
     var name: String
     var resolution: Int
     var bitrate: Int
     var fps: Int
     var audioEnabled: Bool
-    var fullscreen: Bool
-    var mirrorMode: Bool
     var showTouches: Bool
-    var keepAwake: Bool
+    var stayAwake: Bool
 }
 
-struct AppSettings: Codable {
-    var selectedAppearance: String
-    var pullDestination: String
-    var deviceSerial: String
-    var resolution: Int
-    var bitrate: Int
-    var fps: Int
-    var audioEnabled: Bool
-    var fullscreen: Bool
-    var mirrorMode: Bool
-    var showTouches: Bool
-    var keepAwake: Bool
-    var recordEnabled: Bool
-    var profiles: [Profile]
-    var selectedProfileID: UUID?
+struct PersistedSettings: Codable {
+    var appearance = "System"
+    var destination = "~/Downloads"
+    var resolution = 1080
+    var bitrate = 8_000_000
+    var fps = 60
+    var audioEnabled = true
+    var showTouches = false
+    var stayAwake = true
+    var record = false
+    var profiles: [StreamProfile] = []
 }
 
-final class SettingsStore: ObservableObject {
-    @Published var selectedAppearance: String = "Dark" { didSet { persist() } }
-    @Published var pullDestination: String = NSHomeDirectory() + "/Downloads" { didSet { persist() } }
-    @Published var deviceSerial: String = "" { didSet { persist() } }
-    @Published var resolution: Int = 1080 { didSet { persist() } }
-    @Published var bitrate: Int = 8_000_000 { didSet { persist() } }
-    @Published var fps: Int = 60 { didSet { persist() } }
-    @Published var audioEnabled: Bool = true { didSet { persist() } }
-    @Published var fullscreen: Bool = false { didSet { persist() } }
-    @Published var mirrorMode: Bool = true { didSet { persist() } }
-    @Published var showTouches: Bool = false { didSet { persist() } }
-    @Published var keepAwake: Bool = true { didSet { persist() } }
-    @Published var recordEnabled: Bool = false { didSet { persist() } }
-    @Published var profiles: [Profile] = [] { didSet { persist() } }
-    @Published var selectedProfileID: UUID? = nil { didSet { persist() } }
+@MainActor
+final class AppModel: ObservableObject {
+    @Published var devices: [AndroidDevice] = []
+    @Published var selectedSerial = ""
+    @Published var status = "Connect an Android device with USB debugging enabled."
+    @Published var isRefreshing = false
+    @Published var isRunning = false
+    @Published var appearance: String { didSet { save() } }
+    @Published var destination: String { didSet { save() } }
+    @Published var resolution: Int { didSet { save() } }
+    @Published var bitrate: Int { didSet { save() } }
+    @Published var fps: Int { didSet { save() } }
+    @Published var audioEnabled: Bool { didSet { save() } }
+    @Published var showTouches: Bool { didSet { save() } }
+    @Published var stayAwake: Bool { didSet { save() } }
+    @Published var record: Bool { didSet { save() } }
+    @Published var profiles: [StreamProfile] { didSet { save() } }
 
-    private let storageURL: URL
+    private let settingsURL: URL
+    private var scrcpyProcess: Process?
+    private var loading = true
 
     init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dirURL = appSupport.appendingPathComponent("SGRGPY", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
-        storageURL = dirURL.appendingPathComponent("settings.json")
-        load()
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SGRGPY", isDirectory: true)
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        settingsURL = support.appendingPathComponent("settings.json")
+        let saved = (try? Data(contentsOf: settingsURL)).flatMap { try? JSONDecoder().decode(PersistedSettings.self, from: $0) } ?? PersistedSettings()
+        appearance = saved.appearance
+        destination = saved.destination
+        resolution = saved.resolution
+        bitrate = saved.bitrate
+        fps = saved.fps
+        audioEnabled = saved.audioEnabled
+        showTouches = saved.showTouches
+        stayAwake = saved.stayAwake
+        record = saved.record
+        profiles = saved.profiles.isEmpty ? Self.defaultProfiles : saved.profiles
+        loading = false
     }
 
-    func load() {
-        if let data = try? Data(contentsOf: storageURL),
-           let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
-            selectedAppearance = decoded.selectedAppearance
-            pullDestination = decoded.pullDestination
-            deviceSerial = decoded.deviceSerial
-            resolution = decoded.resolution
-            bitrate = decoded.bitrate
-            fps = decoded.fps
-            audioEnabled = decoded.audioEnabled
-            fullscreen = decoded.fullscreen
-            mirrorMode = decoded.mirrorMode
-            showTouches = decoded.showTouches
-            keepAwake = decoded.keepAwake
-            recordEnabled = decoded.recordEnabled
-            profiles = decoded.profiles.isEmpty ? Self.defaultProfiles() : decoded.profiles
-            selectedProfileID = decoded.selectedProfileID
-            return
-        }
+    private static let defaultProfiles = [
+        StreamProfile(name: "Balanced", resolution: 1080, bitrate: 8_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true),
+        StreamProfile(name: "Smooth", resolution: 720, bitrate: 4_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true),
+        StreamProfile(name: "High quality", resolution: 1440, bitrate: 16_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true)
+    ]
 
-        profiles = Self.defaultProfiles()
-        selectedProfileID = profiles.first?.id
+    private func save() {
+        guard !loading else { return }
+        let saved = PersistedSettings(appearance: appearance, destination: destination,
+            resolution: resolution, bitrate: bitrate, fps: fps,
+            audioEnabled: audioEnabled, showTouches: showTouches,
+            stayAwake: stayAwake, record: record, profiles: profiles)
+        guard let data = try? JSONEncoder().encode(saved) else { return }
+        try? data.write(to: settingsURL, options: .atomic)
     }
 
-    func persist() {
-        let payload = AppSettings(
-            selectedAppearance: selectedAppearance,
-            pullDestination: pullDestination,
-            deviceSerial: deviceSerial,
-            resolution: resolution,
-            bitrate: bitrate,
-            fps: fps,
-            audioEnabled: audioEnabled,
-            fullscreen: fullscreen,
-            mirrorMode: mirrorMode,
-            showTouches: showTouches,
-            keepAwake: keepAwake,
-            recordEnabled: recordEnabled,
-            profiles: profiles,
-            selectedProfileID: selectedProfileID
-        )
-
-        if let data = try? JSONEncoder().encode(payload) {
-            try? data.write(to: storageURL)
-        }
-    }
-
-    func applyProfile(_ profile: Profile) {
+    func apply(_ profile: StreamProfile) {
         resolution = profile.resolution
         bitrate = profile.bitrate
         fps = profile.fps
         audioEnabled = profile.audioEnabled
-        fullscreen = profile.fullscreen
-        mirrorMode = profile.mirrorMode
         showTouches = profile.showTouches
-        keepAwake = profile.keepAwake
-        selectedProfileID = profile.id
+        stayAwake = profile.stayAwake
     }
 
-    func saveCurrentAsProfile() {
-        let profile = Profile(
-            name: "Preset \(profiles.count + 1)",
-            resolution: resolution,
-            bitrate: bitrate,
-            fps: fps,
-            audioEnabled: audioEnabled,
-            fullscreen: fullscreen,
-            mirrorMode: mirrorMode,
-            showTouches: showTouches,
-            keepAwake: keepAwake
-        )
+    func saveProfile() {
+        let profile = StreamProfile(name: "Preset \(profiles.count + 1)", resolution: resolution,
+            bitrate: bitrate, fps: fps, audioEnabled: audioEnabled,
+            showTouches: showTouches, stayAwake: stayAwake)
         profiles.append(profile)
-        selectedProfileID = profile.id
     }
 
-    func deleteProfile(_ profile: Profile) {
-        profiles.removeAll { $0.id == profile.id }
-        if selectedProfileID == profile.id {
-            selectedProfileID = profiles.first?.id
+    func refreshDevices() {
+        guard !isRefreshing else { return }
+        guard let adb = Self.findExecutable(named: "adb") else {
+            devices = []
+            status = "ADB not found. Install Android platform-tools, then refresh."
+            return
+        }
+        isRefreshing = true
+        status = "Looking for Android devices…"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Self.capture(adb, arguments: ["devices", "-l"])
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isRefreshing = false
+                guard result.status == 0 else {
+                    self.devices = []
+                    self.status = result.output.isEmpty ? "ADB could not list devices." : result.output
+                    return
+                }
+                let found = result.output.split(whereSeparator: \.isNewline).compactMap { line -> AndroidDevice? in
+                    let text = String(line)
+                    guard !text.hasPrefix("List of devices"),
+                          let range = text.range(of: #"^([^\s]+)\s+device(?:\s|$)"#, options: .regularExpression) else { return nil }
+                    let serial = String(text[range]).split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+                    guard !serial.isEmpty else { return nil }
+                    return AndroidDevice(serial: serial, details: text)
+                }
+                self.devices = found
+                if !self.selectedSerial.isEmpty && !found.contains(where: { $0.serial == self.selectedSerial }) {
+                    self.selectedSerial = ""
+                }
+                if self.selectedSerial.isEmpty && found.count == 1 {
+                    self.selectedSerial = found[0].serial
+                }
+                self.status = found.isEmpty ? "No authorized devices found. Check the USB debugging prompt on your phone." : "\(found.count) device\(found.count == 1 ? "" : "s") ready."
+            }
         }
     }
 
-    private static func defaultProfiles() -> [Profile] {
-        [
-            Profile(name: "Balanced", resolution: 1080, bitrate: 8_000_000, fps: 60, audioEnabled: true, fullscreen: false, mirrorMode: true, showTouches: false, keepAwake: true),
-            Profile(name: "Smooth", resolution: 720, bitrate: 4_000_000, fps: 60, audioEnabled: false, fullscreen: false, mirrorMode: true, showTouches: false, keepAwake: true),
-            Profile(name: "High Quality", resolution: 1440, bitrate: 12_000_000, fps: 60, audioEnabled: true, fullscreen: false, mirrorMode: true, showTouches: false, keepAwake: true)
-        ]
+    func start() {
+        guard !isRunning else { return }
+        guard let scrcpy = Self.findExecutable(named: "scrcpy") else {
+            status = "scrcpy not found. Install it with Homebrew or set SCRCPY_BIN."
+            return
+        }
+        guard !selectedSerial.isEmpty else {
+            status = "Select an authorized Android device first."
+            return
+        }
+        if record {
+            let folder = (destination as NSString).expandingTildeInPath
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory), isDirectory.boolValue else {
+                status = "Recording folder does not exist. Choose a valid destination in Preferences."
+                return
+            }
+        }
+
+        let task = Process()
+        task.executableURL = scrcpy
+        task.arguments = makeArguments()
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        var environment = ProcessInfo.processInfo.environment
+        var paths = (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").components(separatedBy: ":")
+        for url in [scrcpy, Self.findExecutable(named: "adb")].compactMap({ $0 }) {
+            let parent = url.deletingLastPathComponent().path
+            if !paths.contains(parent) { paths.insert(parent, at: 0) }
+        }
+        environment["PATH"] = paths.joined(separator: ":")
+        task.environment = environment
+        task.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isRunning = false
+                self.scrcpyProcess = nil
+                self.status = process.terminationStatus == 0 ? "scrcpy session ended." : "scrcpy exited with code \(process.terminationStatus). Check device connection and scrcpy installation."
+            }
+        }
+        do {
+            try task.run()
+            scrcpyProcess = task
+            isRunning = true
+            status = "Mirroring \(selectedSerial). scrcpy opens its own native video window."
+        } catch {
+            status = "Could not launch scrcpy: \(error.localizedDescription)"
+        }
     }
-}
 
-extension Notification.Name {
-    static let launchScrcpy = Notification.Name("launchScrcpy")
-    static let stopScrcpy = Notification.Name("stopScrcpy")
-}
+    func stop() {
+        guard let process = scrcpyProcess, process.isRunning else { return }
+        process.terminate()
+        status = "Stopping scrcpy…"
+    }
 
-private struct AppPalette {
-    let bg: Color
-    let panel: Color
-    let panelStrong: Color
-    let border: Color
-    let accent: Color
-    let muted: Color
-    let success: Color
-    let primaryText: Color
-    let secondaryText: Color
-    let buttonText: Color
-    let ghost: Color
-
-    static func resolved(theme: String, colorScheme: ColorScheme) -> AppPalette {
-        let isDark: Bool
-        switch theme {
-        case "Light": isDark = false
-        case "System": isDark = colorScheme == .dark
-        default: isDark = true
+    func sendNavigation(_ keyCode: String) {
+        guard !selectedSerial.isEmpty, let adb = Self.findExecutable(named: "adb") else {
+            status = "Choose an authorized device before sending navigation keys."
+            return
         }
-
-        if isDark {
-            return AppPalette(
-                bg: Color(nsColor: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 1.00)),
-                panel: Color(nsColor: NSColor(red: 0.15, green: 0.18, blue: 0.23, alpha: 1.00)),
-                panelStrong: Color(nsColor: NSColor(red: 0.19, green: 0.22, blue: 0.28, alpha: 1.00)),
-                border: Color(nsColor: NSColor(red: 0.38, green: 0.42, blue: 0.48, alpha: 0.45)),
-                accent: Color(nsColor: NSColor(red: 0.38, green: 0.78, blue: 0.82, alpha: 1.00)),
-                muted: Color(nsColor: NSColor(red: 0.76, green: 0.79, blue: 0.82, alpha: 1.00)),
-                success: Color(nsColor: NSColor(red: 0.33, green: 0.83, blue: 0.62, alpha: 1.00)),
-                primaryText: .white,
-                secondaryText: Color(nsColor: NSColor(red: 0.87, green: 0.90, blue: 0.94, alpha: 1.00)),
-                buttonText: .black,
-                ghost: Color(nsColor: NSColor(red: 0.12, green: 0.15, blue: 0.20, alpha: 1.00))
-            )
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Self.capture(adb, arguments: ["-s", self?.selectedSerial ?? "", "shell", "input", "keyevent", keyCode])
+            DispatchQueue.main.async {
+                if result.status == 0 { self?.status = "Sent Android navigation command." }
+                else { self?.status = result.output.isEmpty ? "ADB navigation command failed." : result.output }
+            }
         }
+    }
 
-        return AppPalette(
-            bg: Color(nsColor: NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1.00)),
-            panel: Color(nsColor: NSColor(red: 0.94, green: 0.96, blue: 0.98, alpha: 1.00)),
-            panelStrong: Color(nsColor: NSColor(red: 0.90, green: 0.93, blue: 0.96, alpha: 1.00)),
-            border: Color(nsColor: NSColor(red: 0.73, green: 0.78, blue: 0.84, alpha: 1.00)),
-            accent: Color(nsColor: NSColor(red: 0.21, green: 0.70, blue: 0.76, alpha: 1.00)),
-            muted: Color(nsColor: NSColor(red: 0.34, green: 0.38, blue: 0.44, alpha: 1.00)),
-            success: Color(nsColor: NSColor(red: 0.26, green: 0.74, blue: 0.52, alpha: 1.00)),
-            primaryText: .black,
-            secondaryText: Color(nsColor: NSColor(red: 0.25, green: 0.29, blue: 0.32, alpha: 1.00)),
-            buttonText: .white,
-            ghost: Color(nsColor: NSColor(red: 0.99, green: 0.99, blue: 1.00, alpha: 1.00))
-        )
+    private func makeArguments() -> [String] {
+        var args = ["--serial", selectedSerial,
+                    "--max-size", String(resolution),
+                    "--video-bit-rate", String(bitrate),
+                    "--max-fps", String(fps),
+                    "--window-title", "SGRGPY — \(selectedSerial)"]
+        if !audioEnabled { args.append("--no-audio") }
+        if showTouches { args.append("--show-touches") }
+        if stayAwake { args.append("--stay-awake") }
+        if !mirrorMode { args.append("--new-display") }
+        if record {
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let file = URL(fileURLWithPath: (destination as NSString).expandingTildeInPath).appendingPathComponent("sgrgpy-\(stamp).mkv")
+            args += ["--record", file.path]
+        }
+        return args
+    }
+
+    var mirrorMode = true
+
+    private static func findExecutable(named name: String) -> URL? {
+        if name == "scrcpy", let configured = ProcessInfo.processInfo.environment["SCRCPY_BIN"],
+           FileManager.default.isExecutableFile(atPath: configured) { return URL(fileURLWithPath: configured) }
+        let known = name == "adb"
+            ? ["/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/opt/local/bin/adb", "/usr/bin/adb"]
+            : ["/opt/homebrew/bin/scrcpy", "/usr/local/bin/scrcpy", "/usr/local/opt/scrcpy/bin/scrcpy", "/opt/local/bin/scrcpy"]
+        for path in known where FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
+        let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        for directory in pathValue.split(separator: ":") {
+            let path = URL(fileURLWithPath: String(directory)).appendingPathComponent(name).path
+            if FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
+        }
+        return nil
+    }
+
+    private static func capture(_ executable: URL, arguments: [String]) -> (status: Int32, output: String) {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (process.terminationStatus, String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+        } catch {
+            return (-1, error.localizedDescription)
+        }
     }
 }
 
 @main
 struct SGRGPYApp: App {
-    @StateObject private var settings = SettingsStore()
+    @StateObject private var model = AppModel()
     @State private var showPreferences = false
 
     var body: some Scene {
         WindowGroup {
-            ContentView(showPreferences: $showPreferences)
-                .environmentObject(settings)
+            MainView(showPreferences: $showPreferences)
+                .environmentObject(model)
+                .preferredColorScheme(model.appearance == "Light" ? .light : model.appearance == "Dark" ? .dark : nil)
+                .frame(minWidth: 820, minHeight: 620)
+                .task { model.refreshDevices() }
         }
         .commands {
-            CommandMenu("SGRGPY") {
-                Button("Preferences…") {
-                    showPreferences = true
-                }
-                .keyboardShortcut(",", modifiers: [.command])
-
-                Button("Connect") {
-                    NotificationCenter.default.post(name: .launchScrcpy, object: nil)
-                }
+            CommandGroup(replacing: .appSettings) {
+                Button("Preferences…") { showPreferences = true }
+                    .keyboardShortcut(",", modifiers: [.command])
             }
         }
     }
 }
 
-struct ContentView: View {
-    @EnvironmentObject private var settings: SettingsStore
-    @Environment(\.colorScheme) private var colorScheme
+struct MainView: View {
+    @EnvironmentObject private var model: AppModel
     @Binding var showPreferences: Bool
-    @State private var isRunning = false
-    @State private var process: Process?
-
-    private var palette: AppPalette { AppPalette.resolved(theme: settings.selectedAppearance, colorScheme: colorScheme) }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            palette.bg.ignoresSafeArea()
-
-            VStack(spacing: 18) {
-                titleBar(palette: palette)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
-
-                HStack(alignment: .top, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 15) {
-                        devicePanel(palette: palette)
-                        modeButtons(palette: palette)
-                        navigationBar(palette: palette)
+        VStack(spacing: 0) {
+            header
+            HStack(alignment: .top, spacing: 20) {
+                VStack(spacing: 16) {
+                    preview
+                    navigation
+                }
+                .frame(maxWidth: .infinity)
+                VStack(alignment: .leading, spacing: 16) {
+                    devicePicker
+                    parameterCard
+                    optionsCard
+                    HStack {
+                        Button(action: { showPreferences = true }) { Label("Preferences", systemImage: "slider.horizontal.3") }
+                            .buttonStyle(.bordered)
+                        Spacer()
+                        Button(action: { model.isRunning ? model.stop() : model.start() }) {
+                            Label(model.isRunning ? "Stop mirroring" : "Start mirroring", systemImage: model.isRunning ? "stop.fill" : "play.fill")
+                                .frame(minWidth: 145)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color.accentColor)
                     }
-                    .frame(maxWidth: 600, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 16) {
-                        settingsCard(title: "Main parameters", palette: palette) {
-                            VStack(spacing: 12) {
-                                NumberSlider(label: "Resolution", value: $settings.resolution, range: 240...2160, step: 30, palette: palette)
-                                NumberSlider(label: "Bitrate", value: $settings.bitrate, range: 100_000...40_000_000, step: 100_000, palette: palette)
-                                NumberSlider(label: "FPS", value: $settings.fps, range: 15...120, step: 1, palette: palette)
-                            }
-                        }
-
-                        settingsCard(title: "Quick toggles", palette: palette) {
-                            VStack(alignment: .leading, spacing: 12) {
-                                ToggleRow(label: "Audio", isOn: $settings.audioEnabled, palette: palette)
-                                ToggleRow(label: "Show touches", isOn: $settings.showTouches, palette: palette)
-                                ToggleRow(label: "Stay awake", isOn: $settings.keepAwake, palette: palette)
-                                ToggleRow(label: "Fullscreen", isOn: $settings.fullscreen, palette: palette)
-                                ToggleRow(label: "Record to file", isOn: $settings.recordEnabled, palette: palette)
-                            }
-                        }
-
-                        HStack(spacing: 12) {
-                            actionButton(title: isRunning ? "Stop" : "Connect", accent: !isRunning, palette: palette) {
-                                if isRunning { stopScrcpy() } else { launchScrcpy() }
-                            }
-                            actionButton(title: "Open prefs", accent: false, palette: palette) {
-                                showPreferences = true
-                            }
-                        }
-                    }
-                    .frame(maxWidth: 420, alignment: .leading)
                 }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 12)
-
-                statusBar(palette: palette)
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 10)
+                .frame(width: 350)
             }
+            .padding(22)
+            Spacer(minLength: 0)
+            statusBar
         }
-        .sheet(isPresented: $showPreferences) {
-            PreferencesView(showSheet: $showPreferences)
-                .environmentObject(settings)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .launchScrcpy)) { _ in
-            launchScrcpy()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .stopScrcpy)) { _ in
-            stopScrcpy()
-        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $showPreferences) { PreferencesView().environmentObject(model) }
     }
 
-    private func titleBar(palette: AppPalette) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 8) {
-                Circle().fill(Color.red).frame(width: 12, height: 12)
-                Circle().fill(Color.orange).frame(width: 12, height: 12)
-                Circle().fill(Color.green).frame(width: 12, height: 12)
-            }
-
-            Text("SGRGPY")
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundColor(palette.primaryText)
-
-            Spacer()
-
-            HStack(spacing: 10) {
-                Text("gui the f outta scrcpy")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(palette.muted)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(palette.panelStrong.cornerRadius(10))
-
-            actionButton(title: isRunning ? "Running" : "Start", accent: true, compact: true, palette: palette) {
-                if isRunning { stopScrcpy() } else { launchScrcpy() }
-            }
-        }
-        .frame(height: 38)
-    }
-
-    private func devicePanel(palette: AppPalette) -> some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(LinearGradient(colors: [.black, Color(nsColor: NSColor(red: 0.20, green: 0.21, blue: 0.25, alpha: 1.00))], startPoint: .top, endPoint: .bottom))
-                .frame(height: 360)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .strokeBorder(palette.border, lineWidth: 1)
-                )
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(settings.mirrorMode ? "Device mirror" : "Extended display")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Spacer()
-                    Capsule()
-                        .fill(palette.accent.opacity(0.18))
-                        .frame(width: 68, height: 24)
-                        .overlay(Text(settings.mirrorMode ? "Live" : "Window").font(.system(size: 11, weight: .semibold)).foregroundColor(palette.accent))
-                }
-                .padding(.horizontal, 18)
-                .padding(.top, 16)
-
-                Spacer()
-
-                HStack(alignment: .bottom) {
-                    Text("Android 14")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Spacer()
-                    Text("\(settings.resolution) × 1920")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 16)
-            }
-        }
-    }
-
-    private func modeButtons(palette: AppPalette) -> some View {
-        HStack(spacing: 10) {
-            modeButton(title: "Mirror", active: settings.mirrorMode, palette: palette) {
-                settings.mirrorMode = true
-            }
-            modeButton(title: "Extended", active: !settings.mirrorMode, palette: palette) {
-                settings.mirrorMode = false
-            }
-        }
-    }
-
-    private func navigationBar(palette: AppPalette) -> some View {
+    private var header: some View {
         HStack(spacing: 12) {
-            navButton(icon: "clock.arrow.circlepath", label: "Recent", palette: palette)
-            navButton(icon: "house.fill", label: "Home", palette: palette)
-            navButton(icon: "arrow.uturn.left", label: "Back", palette: palette)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .background(palette.panelStrong.cornerRadius(18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(palette.border, lineWidth: 1))
-    }
-
-    private func statusBar(palette: AppPalette) -> some View {
-        HStack(spacing: 14) {
-            Label("Ready", systemImage: "circle.fill")
-                .foregroundStyle(palette.success)
-                .font(.system(size: 12, weight: .semibold))
-
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SGRGPY").font(.system(size: 16, weight: .bold, design: .rounded))
+                Text("gui the f outta scrcpy").font(.caption).foregroundStyle(.secondary)
+            }
             Spacer()
-
-            Text("scrcpy binary: \(scrcpyBinaryCandidate())")
-                .foregroundStyle(palette.muted)
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(1)
+            if model.isRefreshing { ProgressView().controlSize(.small) }
+            Button { model.refreshDevices() } label: { Label("Refresh devices", systemImage: "arrow.clockwise") }
+                .buttonStyle(.bordered)
+                .disabled(model.isRefreshing)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
-        .background(palette.panelStrong.cornerRadius(14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(palette.border, lineWidth: 1))
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .background(.bar)
     }
 
-    private func launchScrcpy() {
-        guard let binaryURL = scrcpyBinaryURL() else {
-            NSApp.presentError(alert: "scrcpy was not found. Install via Homebrew or set SCRCPY_BIN.")
-            return
+    private var preview: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label(model.mirrorMode ? "Device mirror" : "Extended display", systemImage: model.mirrorMode ? "iphone" : "macbook.and.iphone")
+                    .font(.headline)
+                Spacer()
+                Circle().fill(model.isRunning ? Color.green : Color.secondary.opacity(0.5)).frame(width: 8, height: 8)
+                Text(model.isRunning ? "Running" : "Not started").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "iphone.gen3")
+                .font(.system(size: 74, weight: .ultraLight))
+                .foregroundStyle(.secondary.opacity(0.55))
+            Text(model.selectedSerial.isEmpty ? "Select an Android device to begin" : model.selectedSerial)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text("The live video appears in scrcpy’s own native window.")
+                .font(.caption).foregroundStyle(.tertiary)
+            Spacer()
         }
+        .frame(maxWidth: .infinity, minHeight: 380)
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.secondary.opacity(0.15)))
+    }
 
-        let task = Process()
-        task.executableURL = binaryURL
-        task.arguments = buildScrcpyArguments()
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
+    private var navigation: some View {
+        HStack(spacing: 12) {
+            navButton("Recent", icon: "square.stack.3d.up", key: "KEYCODE_APP_SWITCH")
+            navButton("Home", icon: "house", key: "KEYCODE_HOME")
+            navButton("Back", icon: "chevron.left", key: "KEYCODE_BACK")
+        }
+    }
 
-        do {
-            try task.run()
-            process = task
-            isRunning = true
-            DispatchQueue.global().async {
-                task.waitUntilExit()
-                DispatchQueue.main.async {
-                    isRunning = false
-                    process = nil
+    private func navButton(_ title: String, icon: String, key: String) -> some View {
+        Button { model.sendNavigation(key) } label: {
+            Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 38)
+        }
+        .buttonStyle(.bordered)
+        .disabled(model.selectedSerial.isEmpty)
+        .help("Send Android \(title) key using ADB")
+    }
+
+    private var devicePicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("DEVICE").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            Picker("Android device", selection: $model.selectedSerial) {
+                Text("Choose a device…").tag("")
+                ForEach(model.devices) { device in
+                    Text(device.serial).tag(device.serial)
                 }
             }
-        } catch {
-            NSApp.presentError(alert: "Failed to start scrcpy: \(error.localizedDescription)")
-        }
-    }
-
-    private func stopScrcpy() {
-        process?.terminate()
-        isRunning = false
-        process = nil
-    }
-
-    private func buildScrcpyArguments() -> [String] {
-        var args: [String] = []
-
-        if !settings.deviceSerial.isEmpty {
-            args += ["--serial", settings.deviceSerial]
-        }
-
-        if !settings.mirrorMode {
-            args += ["--new-display"]
-        }
-
-        args += ["--max-size", String(settings.resolution)]
-        args += ["--bit-rate", String(settings.bitrate)]
-        args += ["--max-fps", String(settings.fps)]
-
-        if !settings.audioEnabled { args += ["--no-audio"] }
-        if settings.fullscreen { args += ["--fullscreen"] }
-        if settings.showTouches { args += ["--show-touches"] }
-        if settings.keepAwake { args += ["--stay-awake"] }
-
-        if settings.recordEnabled {
-            let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let filename = "sgrgpy-\(timestamp).mkv"
-            let outputURL = URL(fileURLWithPath: settings.pullDestination).appendingPathComponent(filename)
-            args += ["--record", outputURL.path]
-        }
-
-        args += ["--window-title", "SGRGPY"]
-        return args
-    }
-
-    private func scrcpyBinaryCandidate() -> String {
-        if let url = scrcpyBinaryURL() { return url.path }
-        return "not found"
-    }
-
-    private func scrcpyBinaryURL() -> URL? {
-        if let envPath = ProcessInfo.processInfo.environment["SCRCPY_BIN"], !envPath.isEmpty {
-            return URL(fileURLWithPath: envPath)
-        }
-
-        let candidates = [
-            "/opt/homebrew/bin/scrcpy",
-            "/usr/local/bin/scrcpy",
-            "/usr/local/opt/scrcpy/bin/scrcpy",
-            "/opt/local/bin/scrcpy",
-            NSHomeDirectory() + "/.local/bin/scrcpy"
-        ]
-
-        for candidate in candidates where FileManager.default.isExecutableFile(atPath: candidate) {
-            return URL(fileURLWithPath: candidate)
-        }
-
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/bash")
-        task.arguments = ["-lc", "which scrcpy || true"]
-        let outputPipe = Pipe()
-        task.standardOutput = outputPipe
-        task.standardError = Pipe()
-
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let path = output, !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path)
+            .labelsHidden()
+            .disabled(model.devices.isEmpty)
+            if model.devices.isEmpty {
+                Text("Enable USB debugging, accept the prompt, then refresh.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-        } catch {}
-
-        return nil
-    }
-}
-
-private struct settingsCard<Content: View>: View {
-    let title: String
-    let palette: AppPalette
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(palette.muted)
-            content
         }
         .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.panelStrong.cornerRadius(18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(palette.border, lineWidth: 1))
+        .background(cardBackground)
     }
-}
 
-private struct NumberSlider: View {
-    let label: String
-    @Binding var value: Int
-    let range: ClosedRange<Int>
-    let step: Int
-    let palette: AppPalette
+    private var parameterCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Stream quality").font(.headline)
+            parameter("Resolution", value: $model.resolution, range: 240...2160, step: 30, suffix: " px")
+            parameter("Bitrate", value: $model.bitrate, range: 1_000_000...40_000_000, step: 1_000_000, suffix: " bps")
+            parameter("Frame rate", value: $model.fps, range: 15...120, step: 1, suffix: " fps")
+        }
+        .padding(14)
+        .background(cardBackground)
+    }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func parameter(_ title: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int, suffix: String) -> some View {
+        VStack(spacing: 5) {
             HStack {
-                Text(label)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(palette.muted)
+                Text(title).font(.subheadline)
                 Spacer()
-                TextField("", text: Binding(
-                    get: { String(value) },
-                    set: { newValue in
-                        if let parsed = Int(newValue) {
-                            value = min(max(parsed, range.lowerBound), range.upperBound)
-                        }
-                    }
-                ))
-                .frame(width: 96)
-                .padding(6)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(palette.primaryText)
+                TextField(title, value: value, format: .number.grouping(.never))
+                    .frame(width: 88)
+                    .multilineTextAlignment(.trailing)
+                    .textFieldStyle(.roundedBorder)
+                Text(suffix).font(.caption).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
             }
-
-            Slider(value: Binding(
-                get: { Double(value) },
-                set: { newValue in value = Int(newValue.rounded()) }
-            ), in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step))
-            .accentColor(palette.accent)
+            Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Int($0.rounded()) }), in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step))
+                .tint(Color.accentColor)
         }
     }
-}
 
-private struct ToggleRow: View {
-    let label: String
-    @Binding var isOn: Bool
-    let palette: AppPalette
-
-    var body: some View {
-        Toggle(isOn: $isOn) {
-            Text(label)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(palette.primaryText)
+    private var optionsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Options").font(.headline)
+            Toggle("Audio", isOn: $model.audioEnabled)
+            Toggle("Show touches", isOn: $model.showTouches)
+            Toggle("Keep device awake", isOn: $model.stayAwake)
+            Toggle("Record session", isOn: $model.record)
         }
-        .toggleStyle(SwitchToggleStyle(tint: palette.accent))
+        .toggleStyle(.switch)
+        .padding(14)
+        .background(cardBackground)
     }
-}
 
-private struct modeButton: View {
-    let title: String
-    let active: Bool
-    let palette: AppPalette
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .foregroundStyle(active ? palette.buttonText : palette.primaryText)
-                .background(active ? palette.accent : palette.panelStrong)
-                .cornerRadius(12)
+    private var statusBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: model.isRunning ? "circle.fill" : "info.circle")
+                .foregroundStyle(model.isRunning ? .green : .secondary)
+            Text(model.status).lineLimit(1)
+            Spacer()
+            Text("macOS 12+").foregroundStyle(.tertiary)
         }
-        .buttonStyle(.plain)
+        .font(.caption)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
-}
 
-private struct navButton: View {
-    let icon: String
-    let label: String
-    let palette: AppPalette
-
-    var body: some View {
-        Button(action: {}) {
-            VStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 18, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 11, weight: .medium))
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .foregroundStyle(palette.primaryText)
-            .background(palette.panel.cornerRadius(12))
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct actionButton: View {
-    let title: String
-    let accent: Bool
-    let palette: AppPalette
-    var compact: Bool = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: compact ? 11 : 13, weight: .semibold))
-                .frame(minWidth: compact ? 84 : 120, minHeight: compact ? 26 : 36)
-                .padding(.horizontal, compact ? 10 : 14)
-                .foregroundStyle(accent ? palette.buttonText : palette.primaryText)
-                .background(accent ? palette.accent : palette.panelStrong)
-                .cornerRadius(12)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-extension NSApplication {
-    func presentError(alert message: String) {
-        let alert = NSAlert()
-        alert.messageText = "SGRGPY"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.secondary.opacity(0.12)))
     }
 }
 
 struct PreferencesView: View {
-    @EnvironmentObject private var settings: SettingsStore
-    @Environment(\.colorScheme) private var colorScheme
-    @Binding var showSheet: Bool
-
-    private var palette: AppPalette { AppPalette.resolved(theme: settings.selectedAppearance, colorScheme: colorScheme) }
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("Preferences")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(palette.primaryText)
-                Spacer()
-                Button("Close") {
-                    showSheet = false
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Preferences").font(.title2.bold())
+                    Text("Tune the app and manage your presets.").font(.subheadline).foregroundStyle(.secondary)
                 }
-                .foregroundStyle(palette.primaryText)
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
-
             Form {
                 Section("Appearance") {
-                    Picker("Look", selection: $settings.selectedAppearance) {
-                        Text("Dark").tag("Dark")
-                        Text("Light").tag("Light")
+                    Picker("Theme", selection: $model.appearance) {
                         Text("System").tag("System")
+                        Text("Light").tag("Light")
+                        Text("Dark").tag("Dark")
                     }
                     .pickerStyle(.segmented)
-                    .tint(palette.accent)
                 }
-
-                Section("Pull destination") {
+                Section("Recording destination") {
                     HStack {
-                        TextField("Destination folder", text: $settings.pullDestination)
-                        Button("Choose") {
+                        TextField("~/Downloads", text: $model.destination)
+                        Button("Choose…") {
                             let panel = NSOpenPanel()
                             panel.canChooseFiles = false
                             panel.canChooseDirectories = true
                             panel.allowsMultipleSelection = false
-                            panel.begin { response in
-                                if response == .OK, let url = panel.url {
-                                    settings.pullDestination = url.path
-                                }
-                            }
+                            panel.begin { if $0 == .OK, let url = panel.url { model.destination = url.path } }
                         }
                     }
+                    Text("Recording files are saved here as MKV. This folder does not change ADB pull behavior.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-
-                Section("Profiles") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(settings.profiles) { profile in
-                            HStack {
-                                Text(profile.name)
-                                Spacer()
-                                Button("Use") {
-                                    settings.applyProfile(profile)
-                                }
-                                Button("Delete", role: .destructive) {
-                                    settings.deleteProfile(profile)
-                                }
+                Section("Presets") {
+                    ForEach(model.profiles) { profile in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(profile.name).font(.subheadline.weight(.medium))
+                                Text("\(profile.resolution)p · \(profile.bitrate / 1_000_000) Mbps · \(profile.fps) FPS")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
-                        }
-
-                        Button("Save current as preset") {
-                            settings.saveCurrentAsProfile()
+                            Spacer()
+                            Button("Apply") { model.apply(profile) }
+                            Button(role: .destructive) { model.profiles.removeAll { $0.id == profile.id } } label: {
+                                Image(systemName: "trash")
+                            }
+                            .help("Delete preset")
                         }
                     }
-                }
-
-                Section("Advanced") {
-                    ToggleRow(label: "Audio enabled", isOn: $settings.audioEnabled, palette: palette)
-                    ToggleRow(label: "Fullscreen", isOn: $settings.fullscreen, palette: palette)
-                    ToggleRow(label: "Mirror mode", isOn: $settings.mirrorMode, palette: palette)
-                    ToggleRow(label: "Keep awake", isOn: $settings.keepAwake, palette: palette)
+                    Button { model.saveProfile() } label: { Label("Save current settings as preset", systemImage: "plus") }
                 }
             }
-            .formStyle(.automatic)
-            .background(palette.bg)
+            .formStyle(.grouped)
         }
-        .padding(20)
-        .frame(width: 540, height: 560)
-        .background(palette.bg)
+        .padding(22)
+        .frame(width: 560, height: 560)
     }
 }
-
-#warning("This project is a native macOS frontend for scrcpy. It intentionally launches the upstream scrcpy binary rather than reimplementing it.")
