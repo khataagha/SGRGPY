@@ -1,84 +1,90 @@
 # SGRGPY
 
-**gui the f outta scrcpy** — a native macOS app that includes the upstream scrcpy runtime in its `.app` bundle.
+**gui the f outta scrcpy** — an all-in-one macOS desktop app for Android mirroring and control.
 
-## This is an all-in-one bundle
+SGRGPY is a native SwiftUI application packaged with the matching official scrcpy macOS runtime. The generated `.app` includes the SGRGPY UI, upstream `scrcpy`, `adb`, the matching scrcpy server, and the upstream release resources/notices. The exact upstream archive is downloaded at packaging time and SHA-256 verified before use; third-party binaries are not committed into this source repository.
 
-SGRGPY is not a GUI that requires Homebrew-installed scrcpy or ADB after packaging. The build downloads the **official, version-pinned Genymobile macOS release archive**, verifies its SHA-256, and copies the full distribution into `SGRGPY.app/Contents/Resources/scrcpy-runtime/`. The bundle includes the matching `scrcpy`, `adb`, `scrcpy-server`, support files, and upstream license. Runtime binaries are generated into the app at build time and are not committed to this source repository.
+## What the app does
 
-The main SGRGPY window controls the bundled runtime; scrcpy currently renders its live video in scrcpy’s own native video window. The preview panel in SGRGPY is a device/status panel, not an embedded video surface. Embedding the video renderer directly into the SGRGPY window is a separate integration task and is not claimed here.
+- Native macOS window with standard traffic-light controls.
+- Detects and selects authorized Android devices through bundled ADB.
+- Launches bundled scrcpy with adjustable resolution, video bitrate, frame rate, audio, touch display, stay-awake, recording, and extended-display settings.
+- Recent / Home / Back buttons send Android key events using the bundled ADB.
+- System, Light, and Dark appearance options; preferences via **⌘,**.
+- Named presets persist alongside settings in `~/Library/Application Support/SGRGPY/settings.json`.
+- Recording destination can be chosen in Preferences.
 
-## Features
+The control window is not the video renderer: scrcpy opens its own native video window. Embedding the actual video stream into SGRGPY is not implemented.
 
-- Native SwiftUI app for macOS 12 Monterey and newer, with standard macOS window chrome.
-- Bundled official scrcpy and ADB runtime; no Homebrew install required for the packaged app.
-- Device discovery and selection, including multiple authorized Android devices.
-- Resolution, bitrate, and FPS sliders with editable numeric fields.
-- Start/stop, audio, touches, stay-awake, recording and mirror/extended-display options.
-- Recent / Home / Back controls sent to the selected device through bundled ADB.
-- System / Light / Dark appearance and named reusable presets.
-- Preferences shortcut: **⌘,**.
-- Settings stored in `~/Library/Application Support/SGRGPY/settings.json`.
+## Requirements
 
-## Build the app on macOS
+- macOS 12 Monterey or newer.
+- Swift 5.9+ / Xcode Command Line Tools.
+- Network access during packaging to fetch the official scrcpy release archive.
 
-Requirements: macOS, Swift 5.9+ (Xcode Command Line Tools), `curl`, `tar`, and `shasum`. Internet access is needed to fetch the official scrcpy archive during packaging.
+No separate Homebrew installation of scrcpy or ADB is required by the generated bundle. Android device setup still requires Developer Options and USB debugging enabled, and you must accept the computer authorization prompt on the phone.
 
-```sh
-./build_app.sh
-open dist/SGRGPY-x86_64.app  # Intel Macs, including the 2015 MacBook Pro
-# or: open dist/SGRGPY-aarch64.app  # Apple Silicon
-```
+## Build the all-in-one app
 
-The script selects the current machine's architecture automatically. To explicitly select an architecture:
+On the Mac you intend to run the app on, from the repository root:
 
 ```sh
-SCRCPY_ARCH=x86_64 ./build_app.sh
-SCRCPY_ARCH=aarch64 ./build_app.sh
+xcode-select --install
+bash ./build_app.sh
+open dist/SGRGPY.app
 ```
 
-The generated `.app` is architecture-specific, unsigned by default, and not notarized. To sign locally with a Developer ID identity:
+The script selects the host architecture (`x86_64` for the mid-2015 Intel MacBook Pro, `arm64` for Apple Silicon), downloads official scrcpy v5.0.1, verifies the published SHA-256, compiles SGRGPY, and assembles `dist/SGRGPY.app/Contents/Resources/runtime/` with the official scrcpy client, ADB, server, and release resources.
+
+To package a later upstream release, set `SCRCPY_VERSION` only after updating the corresponding official archive checksums in `build_app.sh`:
 
 ```sh
-CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build_app.sh
+SCRCPY_VERSION=v5.0.1 bash ./build_app.sh
 ```
 
-A signed release should also be notarized before distribution. The build script checks the pinned upstream archive hash before extraction; do not replace that check with an unverified download.
+The bundle is unsigned by default for local development. For distribution, set `CODE_SIGN_IDENTITY` to a valid Developer ID Application certificate name before building. Notarization and stapling require Apple signing credentials and are not automated here.
 
-## Upstream dependency and licensing
+## Controls and use
 
-- scrcpy release and source: [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy)
-- Pinned version: [v5.0.1](https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1)
-- Intel archive: `scrcpy-macos-x86_64-v5.0.1.tar.gz`
-- Apple Silicon archive: `scrcpy-macos-aarch64-v5.0.1.tar.gz`
-- The build script verifies the official SHA-256 sums documented by upstream.
-- The upstream archive's license and supporting resources are included in the app's runtime directory.
-- SGRGPY is independent and is not affiliated with Genymobile or the scrcpy maintainers. See `LICENSE` for this repository's license and the bundled upstream license for scrcpy terms.
+1. Connect the Android phone by USB and enable USB debugging.
+2. Accept the debugging authorization prompt on the phone.
+3. Launch SGRGPY and click **Refresh devices**.
+4. Select the device, adjust stream settings, then click **Start mirroring**.
+5. The scrcpy video window opens separately. Use the dashboard’s Recent, Home, and Back buttons as needed.
+6. Stop the session from SGRGPY before changing launch-time stream parameters.
 
-## Troubleshooting
-
-- **No devices:** enable Android developer options and USB debugging, connect the device, accept its authorization dialog, then refresh devices.
-- **App opens but cannot start scrcpy:** rebuild the bundle; check that `Contents/Resources/scrcpy-runtime/` contains executable `scrcpy`, executable `adb`, and `scrcpy-server`.
-- **Recording fails:** choose an existing writable destination folder in Preferences. The destination is for recordings, not `adb pull`.
-- **Gatekeeper warning:** unsigned builds are intended for local use. Sign and notarize builds for distribution.
+A recording is written as an MKV file in the selected destination. The destination setting applies to recordings, not to `adb pull`.
 
 ## Screenshots
 
-The SVG assets are illustrative design mockups, not captured screenshots from a running build.
+The SVG assets are design mockups, not runtime screenshots from a built release.
 
-![Illustrative main window](assets/screenshot-main.svg)
+![Illustrative SGRGPY dashboard](assets/screenshot-main.svg)
 
 ![Illustrative preferences](assets/screenshot-preferences.svg)
 
-## Repository contents
+## Troubleshooting
+
+- **No devices:** enable USB debugging, authorize the host on the phone, check the USB cable, then refresh.
+- **App reports incomplete bundled runtime:** rebuild with `bash ./build_app.sh`; packaging checks for the official client, ADB, and server.
+- **Recording fails:** choose an existing writable directory in Preferences.
+- **Gatekeeper warning:** local builds are unsigned. Sign/notarize for distribution or use the normal local macOS override for software you built and trust.
+
+## Repository structure
 
 ```text
 .
 ├── Package.swift
 ├── Sources/SGRGPY/main.swift
-├── scripts/build_app.sh
-├── build_app.sh
-├── assets/
-├── LICENSE
-└── NOTICE
+├── assets/                 # App icon and illustrative mockups
+├── build_app.sh            # Fetches, verifies, and bundles upstream runtime
+├── LICENSE                 # SGRGPY source license
+├── NOTICE
+└── README.md
 ```
+
+## Third-party components and licenses
+
+SGRGPY is independent and is not affiliated with Genymobile or the scrcpy maintainers. The packaging script fetches the official macOS release from [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy/releases) and verifies the pinned release checksum. The official archive's runtime files and license/notices are included in the app bundle. scrcpy is Apache-2.0 licensed; see the upstream [LICENSE](https://github.com/Genymobile/scrcpy/blob/master/LICENSE). Android Debug Bridge is part of Android SDK Platform Tools; consult the [Android Platform Tools license and terms](https://developer.android.com/tools/releases/platform-tools). Do not remove upstream notices when redistributing.
+
+SGRGPY source is licensed under Apache License 2.0; see [LICENSE](LICENSE).
