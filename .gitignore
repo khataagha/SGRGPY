@@ -1,0 +1,7 @@
+# SGRGPY
+
+# Basic ignore rules for the Swift package and generated app bundle.
+.build/
+.DS_Store
+**/.DS_Store
+dist/
