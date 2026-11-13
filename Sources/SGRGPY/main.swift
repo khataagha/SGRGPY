@@ -155,13 +155,56 @@ extension Notification.Name {
 }
 
 private struct AppPalette {
-    static let bg = Color(nsColor: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 1.00))
-    static let panel = Color(nsColor: NSColor(red: 0.15, green: 0.18, blue: 0.23, alpha: 1.00))
-    static let panelStrong = Color(nsColor: NSColor(red: 0.19, green: 0.22, blue: 0.28, alpha: 1.00))
-    static let border = Color(nsColor: NSColor(red: 0.38, green: 0.42, blue: 0.48, alpha: 0.45))
-    static let accent = Color(nsColor: NSColor(red: 0.38, green: 0.78, blue: 0.82, alpha: 1.00))
-    static let muted = Color(nsColor: NSColor(red: 0.76, green: 0.79, blue: 0.82, alpha: 1.00))
-    static let success = Color(nsColor: NSColor(red: 0.33, green: 0.83, blue: 0.62, alpha: 1.00))
+    let bg: Color
+    let panel: Color
+    let panelStrong: Color
+    let border: Color
+    let accent: Color
+    let muted: Color
+    let success: Color
+    let primaryText: Color
+    let secondaryText: Color
+    let buttonText: Color
+    let ghost: Color
+
+    static func resolved(theme: String, colorScheme: ColorScheme) -> AppPalette {
+        let isDark: Bool
+        switch theme {
+        case "Light": isDark = false
+        case "System": isDark = colorScheme == .dark
+        default: isDark = true
+        }
+
+        if isDark {
+            return AppPalette(
+                bg: Color(nsColor: NSColor(red: 0.10, green: 0.12, blue: 0.16, alpha: 1.00)),
+                panel: Color(nsColor: NSColor(red: 0.15, green: 0.18, blue: 0.23, alpha: 1.00)),
+                panelStrong: Color(nsColor: NSColor(red: 0.19, green: 0.22, blue: 0.28, alpha: 1.00)),
+                border: Color(nsColor: NSColor(red: 0.38, green: 0.42, blue: 0.48, alpha: 0.45)),
+                accent: Color(nsColor: NSColor(red: 0.38, green: 0.78, blue: 0.82, alpha: 1.00)),
+                muted: Color(nsColor: NSColor(red: 0.76, green: 0.79, blue: 0.82, alpha: 1.00)),
+                success: Color(nsColor: NSColor(red: 0.33, green: 0.83, blue: 0.62, alpha: 1.00)),
+                primaryText: .white,
+                secondaryText: Color(nsColor: NSColor(red: 0.87, green: 0.90, blue: 0.94, alpha: 1.00)),
+                buttonText: .black,
+                ghost: Color(nsColor: NSColor(red: 0.12, green: 0.15, blue: 0.20, alpha: 1.00))
+            )
+        }
+
+        return AppPalette(
+            bg: Color(nsColor: NSColor(red: 0.96, green: 0.97, blue: 0.98, alpha: 1.00)),
+            panel: Color(nsColor: NSColor(red: 0.94, green: 0.96, blue: 0.98, alpha: 1.00)),
+            panelStrong: Color(nsColor: NSColor(red: 0.90, green: 0.93, blue: 0.96, alpha: 1.00)),
+            border: Color(nsColor: NSColor(red: 0.73, green: 0.78, blue: 0.84, alpha: 1.00)),
+            accent: Color(nsColor: NSColor(red: 0.21, green: 0.70, blue: 0.76, alpha: 1.00)),
+            muted: Color(nsColor: NSColor(red: 0.34, green: 0.38, blue: 0.44, alpha: 1.00)),
+            success: Color(nsColor: NSColor(red: 0.26, green: 0.74, blue: 0.52, alpha: 1.00)),
+            primaryText: .black,
+            secondaryText: Color(nsColor: NSColor(red: 0.25, green: 0.29, blue: 0.32, alpha: 1.00)),
+            buttonText: .white,
+            ghost: Color(nsColor: NSColor(red: 0.99, green: 0.99, blue: 1.00, alpha: 1.00))
+        )
+    }
 }
 
 @main
@@ -191,51 +234,54 @@ struct SGRGPYApp: App {
 
 struct ContentView: View {
     @EnvironmentObject private var settings: SettingsStore
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var showPreferences: Bool
     @State private var isRunning = false
     @State private var process: Process?
 
+    private var palette: AppPalette { AppPalette.resolved(theme: settings.selectedAppearance, colorScheme: colorScheme) }
+
     var body: some View {
         ZStack(alignment: .top) {
-            AppPalette.bg.ignoresSafeArea()
+            palette.bg.ignoresSafeArea()
 
             VStack(spacing: 18) {
-                titleBar
+                titleBar(palette: palette)
                     .padding(.horizontal, 16)
                     .padding(.top, 10)
 
                 HStack(alignment: .top, spacing: 18) {
                     VStack(alignment: .leading, spacing: 15) {
-                        devicePanel
-                        modeButtons
-                        navigationBar
+                        devicePanel(palette: palette)
+                        modeButtons(palette: palette)
+                        navigationBar(palette: palette)
                     }
                     .frame(maxWidth: 600, alignment: .leading)
 
                     VStack(alignment: .leading, spacing: 16) {
-                        settingsCard(title: "Main parameters") {
+                        settingsCard(title: "Main parameters", palette: palette) {
                             VStack(spacing: 12) {
-                                NumberSlider(label: "Resolution", value: $settings.resolution, range: 240...2160, step: 30)
-                                NumberSlider(label: "Bitrate", value: $settings.bitrate, range: 100_000...40_000_000, step: 100_000)
-                                NumberSlider(label: "FPS", value: $settings.fps, range: 15...120, step: 1)
+                                NumberSlider(label: "Resolution", value: $settings.resolution, range: 240...2160, step: 30, palette: palette)
+                                NumberSlider(label: "Bitrate", value: $settings.bitrate, range: 100_000...40_000_000, step: 100_000, palette: palette)
+                                NumberSlider(label: "FPS", value: $settings.fps, range: 15...120, step: 1, palette: palette)
                             }
                         }
 
-                        settingsCard(title: "Quick toggles") {
+                        settingsCard(title: "Quick toggles", palette: palette) {
                             VStack(alignment: .leading, spacing: 12) {
-                                ToggleRow(label: "Audio", isOn: $settings.audioEnabled)
-                                ToggleRow(label: "Show touches", isOn: $settings.showTouches)
-                                ToggleRow(label: "Stay awake", isOn: $settings.keepAwake)
-                                ToggleRow(label: "Fullscreen", isOn: $settings.fullscreen)
-                                ToggleRow(label: "Record to file", isOn: $settings.recordEnabled)
+                                ToggleRow(label: "Audio", isOn: $settings.audioEnabled, palette: palette)
+                                ToggleRow(label: "Show touches", isOn: $settings.showTouches, palette: palette)
+                                ToggleRow(label: "Stay awake", isOn: $settings.keepAwake, palette: palette)
+                                ToggleRow(label: "Fullscreen", isOn: $settings.fullscreen, palette: palette)
+                                ToggleRow(label: "Record to file", isOn: $settings.recordEnabled, palette: palette)
                             }
                         }
 
                         HStack(spacing: 12) {
-                            actionButton(title: isRunning ? "Stop" : "Connect", accent: !isRunning) {
+                            actionButton(title: isRunning ? "Stop" : "Connect", accent: !isRunning, palette: palette) {
                                 if isRunning { stopScrcpy() } else { launchScrcpy() }
                             }
-                            actionButton(title: "Open prefs", accent: false) {
+                            actionButton(title: "Open prefs", accent: false, palette: palette) {
                                 showPreferences = true
                             }
                         }
@@ -245,7 +291,7 @@ struct ContentView: View {
                 .padding(.horizontal, 18)
                 .padding(.bottom, 12)
 
-                statusBar
+                statusBar(palette: palette)
                     .padding(.horizontal, 18)
                     .padding(.bottom, 10)
             }
@@ -262,7 +308,7 @@ struct ContentView: View {
         }
     }
 
-    private var titleBar: some View {
+    private func titleBar(palette: AppPalette) -> some View {
         HStack(alignment: .center, spacing: 12) {
             HStack(spacing: 8) {
                 Circle().fill(Color.red).frame(width: 12, height: 12)
@@ -272,34 +318,34 @@ struct ContentView: View {
 
             Text("SGRGPY")
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundColor(.primary)
+                .foregroundColor(palette.primaryText)
 
             Spacer()
 
             HStack(spacing: 10) {
                 Text("gui the f outta scrcpy")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(AppPalette.muted)
+                    .foregroundStyle(palette.muted)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(AppPalette.panelStrong.cornerRadius(10))
+            .background(palette.panelStrong.cornerRadius(10))
 
-            actionButton(title: isRunning ? "Running" : "Start", accent: true, compact: true) {
+            actionButton(title: isRunning ? "Running" : "Start", accent: true, compact: true, palette: palette) {
                 if isRunning { stopScrcpy() } else { launchScrcpy() }
             }
         }
         .frame(height: 38)
     }
 
-    private var devicePanel: some View {
+    private func devicePanel(palette: AppPalette) -> some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .fill(LinearGradient(colors: [.black, Color(nsColor: NSColor(red: 0.20, green: 0.21, blue: 0.25, alpha: 1.00))], startPoint: .top, endPoint: .bottom))
                 .frame(height: 360)
                 .overlay(
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .strokeBorder(AppPalette.border, lineWidth: 1)
+                        .strokeBorder(palette.border, lineWidth: 1)
                 )
 
             VStack(alignment: .leading, spacing: 8) {
@@ -309,9 +355,9 @@ struct ContentView: View {
                         .foregroundStyle(.white)
                     Spacer()
                     Capsule()
-                        .fill(AppPalette.accent.opacity(0.18))
+                        .fill(palette.accent.opacity(0.18))
                         .frame(width: 68, height: 24)
-                        .overlay(Text(settings.mirrorMode ? "Live" : "Window").font(.system(size: 11, weight: .semibold)).foregroundColor(AppPalette.accent))
+                        .overlay(Text(settings.mirrorMode ? "Live" : "Window").font(.system(size: 11, weight: .semibold)).foregroundColor(palette.accent))
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 16)
@@ -333,51 +379,51 @@ struct ContentView: View {
         }
     }
 
-    private var modeButtons: some View {
+    private func modeButtons(palette: AppPalette) -> some View {
         HStack(spacing: 10) {
-            modeButton(title: "Mirror", active: settings.mirrorMode) {
+            modeButton(title: "Mirror", active: settings.mirrorMode, palette: palette) {
                 settings.mirrorMode = true
             }
-            modeButton(title: "Extended", active: !settings.mirrorMode) {
+            modeButton(title: "Extended", active: !settings.mirrorMode, palette: palette) {
                 settings.mirrorMode = false
             }
         }
     }
 
-    private var navigationBar: some View {
+    private func navigationBar(palette: AppPalette) -> some View {
         HStack(spacing: 12) {
-            navButton(icon: "clock.arrow.circlepath", label: "Recent")
-            navButton(icon: "house.fill", label: "Home")
-            navButton(icon: "arrow.uturn.left", label: "Back")
+            navButton(icon: "clock.arrow.circlepath", label: "Recent", palette: palette)
+            navButton(icon: "house.fill", label: "Home", palette: palette)
+            navButton(icon: "arrow.uturn.left", label: "Back", palette: palette)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .center)
-        .background(AppPalette.panelStrong.cornerRadius(18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppPalette.border, lineWidth: 1))
+        .background(palette.panelStrong.cornerRadius(18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(palette.border, lineWidth: 1))
     }
 
-    private var statusBar: some View {
+    private func statusBar(palette: AppPalette) -> some View {
         HStack(spacing: 14) {
             Label("Ready", systemImage: "circle.fill")
-                .foregroundStyle(AppPalette.success)
+                .foregroundStyle(palette.success)
                 .font(.system(size: 12, weight: .semibold))
 
             Spacer()
 
             Text("scrcpy binary: \(scrcpyBinaryCandidate())")
-                .foregroundStyle(AppPalette.muted)
+                .foregroundStyle(palette.muted)
                 .font(.system(size: 11, weight: .medium))
                 .lineLimit(1)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
-        .background(AppPalette.panelStrong.cornerRadius(14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(AppPalette.border, lineWidth: 1))
+        .background(palette.panelStrong.cornerRadius(14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(palette.border, lineWidth: 1))
     }
 
     private func launchScrcpy() {
         guard let binaryURL = scrcpyBinaryURL() else {
-            NSApp.presentError(alert: "scrcpy was not found. Install it via Homebrew or set SCRCPY_BIN.")
+            NSApp.presentError(alert: "scrcpy was not found. Install via Homebrew or set SCRCPY_BIN.")
             return
         }
 
@@ -432,8 +478,8 @@ struct ContentView: View {
         if settings.recordEnabled {
             let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
             let filename = "sgrgpy-\(timestamp).mkv"
-            let outputUrl = URL(fileURLWithPath: settings.pullDestination).appendingPathComponent(filename)
-            args += ["--record", outputUrl.path]
+            let outputURL = URL(fileURLWithPath: settings.pullDestination).appendingPathComponent(filename)
+            args += ["--record", outputURL.path]
         }
 
         args += ["--window-title", "SGRGPY"]
@@ -476,7 +522,7 @@ struct ContentView: View {
             if let path = output, !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
                 return URL(fileURLWithPath: path)
             }
-        } catch { }
+        } catch {}
 
         return nil
     }
@@ -484,19 +530,20 @@ struct ContentView: View {
 
 private struct settingsCard<Content: View>: View {
     let title: String
+    let palette: AppPalette
     @ViewBuilder let content: Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(AppPalette.muted)
+                .foregroundStyle(palette.muted)
             content
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppPalette.panelStrong.cornerRadius(18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppPalette.border, lineWidth: 1))
+        .background(palette.panelStrong.cornerRadius(18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(palette.border, lineWidth: 1))
     }
 }
 
@@ -505,13 +552,14 @@ private struct NumberSlider: View {
     @Binding var value: Int
     let range: ClosedRange<Int>
     let step: Int
+    let palette: AppPalette
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(AppPalette.muted)
+                    .foregroundStyle(palette.muted)
                 Spacer()
                 TextField("", text: Binding(
                     get: { String(value) },
@@ -526,14 +574,14 @@ private struct NumberSlider: View {
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.primary)
+                .foregroundStyle(palette.primaryText)
             }
 
             Slider(value: Binding(
                 get: { Double(value) },
                 set: { newValue in value = Int(newValue.rounded()) }
             ), in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step))
-            .accentColor(AppPalette.accent)
+            .accentColor(palette.accent)
         }
     }
 }
@@ -541,20 +589,22 @@ private struct NumberSlider: View {
 private struct ToggleRow: View {
     let label: String
     @Binding var isOn: Bool
+    let palette: AppPalette
 
     var body: some View {
         Toggle(isOn: $isOn) {
             Text(label)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary)
+                .foregroundStyle(palette.primaryText)
         }
-        .toggleStyle(SwitchToggleStyle(tint: AppPalette.accent))
+        .toggleStyle(SwitchToggleStyle(tint: palette.accent))
     }
 }
 
 private struct modeButton: View {
     let title: String
     let active: Bool
+    let palette: AppPalette
     let action: () -> Void
 
     var body: some View {
@@ -563,8 +613,8 @@ private struct modeButton: View {
                 .font(.system(size: 12, weight: .semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
-                .foregroundStyle(active ? .black : .primary)
-                .background(active ? AppPalette.accent : AppPalette.panelStrong)
+                .foregroundStyle(active ? palette.buttonText : palette.primaryText)
+                .background(active ? palette.accent : palette.panelStrong)
                 .cornerRadius(12)
         }
         .buttonStyle(.plain)
@@ -574,6 +624,7 @@ private struct modeButton: View {
 private struct navButton: View {
     let icon: String
     let label: String
+    let palette: AppPalette
 
     var body: some View {
         Button(action: {}) {
@@ -585,8 +636,8 @@ private struct navButton: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 12)
-            .foregroundStyle(.primary)
-            .background(AppPalette.panel.cornerRadius(12))
+            .foregroundStyle(palette.primaryText)
+            .background(palette.panel.cornerRadius(12))
         }
         .buttonStyle(.plain)
     }
@@ -595,6 +646,7 @@ private struct navButton: View {
 private struct actionButton: View {
     let title: String
     let accent: Bool
+    let palette: AppPalette
     var compact: Bool = false
     let action: () -> Void
 
@@ -604,8 +656,8 @@ private struct actionButton: View {
                 .font(.system(size: compact ? 11 : 13, weight: .semibold))
                 .frame(minWidth: compact ? 84 : 120, minHeight: compact ? 26 : 36)
                 .padding(.horizontal, compact ? 10 : 14)
-                .foregroundStyle(accent ? .black : .primary)
-                .background(accent ? AppPalette.accent : AppPalette.panelStrong)
+                .foregroundStyle(accent ? palette.buttonText : palette.primaryText)
+                .background(accent ? palette.accent : palette.panelStrong)
                 .cornerRadius(12)
         }
         .buttonStyle(.plain)
@@ -625,17 +677,22 @@ extension NSApplication {
 
 struct PreferencesView: View {
     @EnvironmentObject private var settings: SettingsStore
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var showSheet: Bool
+
+    private var palette: AppPalette { AppPalette.resolved(theme: settings.selectedAppearance, colorScheme: colorScheme) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Preferences")
                     .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(palette.primaryText)
                 Spacer()
                 Button("Close") {
                     showSheet = false
                 }
+                .foregroundStyle(palette.primaryText)
             }
 
             Form {
@@ -646,6 +703,7 @@ struct PreferencesView: View {
                         Text("System").tag("System")
                     }
                     .pickerStyle(.segmented)
+                    .tint(palette.accent)
                 }
 
                 Section("Pull destination") {
@@ -687,15 +745,19 @@ struct PreferencesView: View {
                 }
 
                 Section("Advanced") {
-                    ToggleRow(label: "Audio enabled", isOn: $settings.audioEnabled)
-                    ToggleRow(label: "Fullscreen", isOn: $settings.fullscreen)
-                    ToggleRow(label: "Mirror mode", isOn: $settings.mirrorMode)
-                    ToggleRow(label: "Keep awake", isOn: $settings.keepAwake)
+                    ToggleRow(label: "Audio enabled", isOn: $settings.audioEnabled, palette: palette)
+                    ToggleRow(label: "Fullscreen", isOn: $settings.fullscreen, palette: palette)
+                    ToggleRow(label: "Mirror mode", isOn: $settings.mirrorMode, palette: palette)
+                    ToggleRow(label: "Keep awake", isOn: $settings.keepAwake, palette: palette)
                 }
             }
             .formStyle(.automatic)
+            .background(palette.bg)
         }
         .padding(20)
         .frame(width: 540, height: 560)
+        .background(palette.bg)
     }
 }
+
+#warning("This project is a native macOS frontend for scrcpy. It intentionally launches the upstream scrcpy binary rather than reimplementing it.")
