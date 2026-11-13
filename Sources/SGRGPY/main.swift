@@ -2,9 +2,6 @@ import AppKit
 import Foundation
 import SwiftUI
 
-// SGRGPY is a native front-end for the upstream scrcpy executable. scrcpy
-// remains a separately installed dependency; this app does not fork or bundle it.
-
 struct AndroidDevice: Identifiable, Hashable {
     let serial: String
     let details: String
@@ -20,6 +17,7 @@ struct StreamProfile: Identifiable, Codable, Hashable {
     var audioEnabled: Bool
     var showTouches: Bool
     var stayAwake: Bool
+    var mirrorMode: Bool
 }
 
 struct PersistedSettings: Codable {
@@ -32,6 +30,7 @@ struct PersistedSettings: Codable {
     var showTouches = false
     var stayAwake = true
     var record = false
+    var mirrorMode = true
     var profiles: [StreamProfile] = []
 }
 
@@ -51,18 +50,21 @@ final class AppModel: ObservableObject {
     @Published var showTouches: Bool { didSet { save() } }
     @Published var stayAwake: Bool { didSet { save() } }
     @Published var record: Bool { didSet { save() } }
+    @Published var mirrorMode: Bool { didSet { save() } }
     @Published var profiles: [StreamProfile] { didSet { save() } }
 
     private let settingsURL: URL
     private var scrcpyProcess: Process?
-    private var loading = true
+    private var isLoading = true
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("SGRGPY", isDirectory: true)
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         settingsURL = support.appendingPathComponent("settings.json")
-        let saved = (try? Data(contentsOf: settingsURL)).flatMap { try? JSONDecoder().decode(PersistedSettings.self, from: $0) } ?? PersistedSettings()
+        let saved = (try? Data(contentsOf: settingsURL)).flatMap {
+            try? JSONDecoder().decode(PersistedSettings.self, from: $0)
+        } ?? PersistedSettings()
         appearance = saved.appearance
         destination = saved.destination
         resolution = saved.resolution
@@ -72,23 +74,24 @@ final class AppModel: ObservableObject {
         showTouches = saved.showTouches
         stayAwake = saved.stayAwake
         record = saved.record
+        mirrorMode = saved.mirrorMode
         profiles = saved.profiles.isEmpty ? Self.defaultProfiles : saved.profiles
-        loading = false
+        isLoading = false
     }
 
     private static let defaultProfiles = [
-        StreamProfile(name: "Balanced", resolution: 1080, bitrate: 8_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true),
-        StreamProfile(name: "Smooth", resolution: 720, bitrate: 4_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true),
-        StreamProfile(name: "High quality", resolution: 1440, bitrate: 16_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true)
+        StreamProfile(name: "Balanced", resolution: 1080, bitrate: 8_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true, mirrorMode: true),
+        StreamProfile(name: "Smooth", resolution: 720, bitrate: 4_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true, mirrorMode: true),
+        StreamProfile(name: "High quality", resolution: 1440, bitrate: 16_000_000, fps: 60, audioEnabled: true, showTouches: false, stayAwake: true, mirrorMode: true)
     ]
 
     private func save() {
-        guard !loading else { return }
-        let saved = PersistedSettings(appearance: appearance, destination: destination,
-            resolution: resolution, bitrate: bitrate, fps: fps,
-            audioEnabled: audioEnabled, showTouches: showTouches,
-            stayAwake: stayAwake, record: record, profiles: profiles)
-        guard let data = try? JSONEncoder().encode(saved) else { return }
+        guard !isLoading else { return }
+        let dataModel = PersistedSettings(appearance: appearance, destination: destination,
+            resolution: resolution, bitrate: bitrate, fps: fps, audioEnabled: audioEnabled,
+            showTouches: showTouches, stayAwake: stayAwake, record: record,
+            mirrorMode: mirrorMode, profiles: profiles)
+        guard let data = try? JSONEncoder().encode(dataModel) else { return }
         try? data.write(to: settingsURL, options: .atomic)
     }
 
@@ -99,27 +102,28 @@ final class AppModel: ObservableObject {
         audioEnabled = profile.audioEnabled
         showTouches = profile.showTouches
         stayAwake = profile.stayAwake
+        mirrorMode = profile.mirrorMode
     }
 
-    func saveProfile() {
-        let profile = StreamProfile(name: "Preset \(profiles.count + 1)", resolution: resolution,
-            bitrate: bitrate, fps: fps, audioEnabled: audioEnabled,
-            showTouches: showTouches, stayAwake: stayAwake)
-        profiles.append(profile)
+    func saveProfile(name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return }
+        profiles.append(StreamProfile(name: trimmedName, resolution: resolution, bitrate: bitrate,
+            fps: fps, audioEnabled: audioEnabled, showTouches: showTouches,
+            stayAwake: stayAwake, mirrorMode: mirrorMode))
     }
 
     func refreshDevices() {
         guard !isRefreshing else { return }
-        guard let adb = Self.findExecutable(named: "adb") else {
-            devices = []
-            status = "ADB not found. Install Android platform-tools, then refresh."
+        guard let adb = runtimeExecutable("adb") else {
+            status = "Bundled ADB is missing. Rebuild the app bundle."
             return
         }
         isRefreshing = true
         status = "Looking for Android devices…"
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self] in
             let result = Self.capture(adb, arguments: ["devices", "-l"])
-            DispatchQueue.main.async {
+            await MainActor.run {
                 guard let self else { return }
                 self.isRefreshing = false
                 guard result.status == 0 else {
@@ -128,39 +132,32 @@ final class AppModel: ObservableObject {
                     return
                 }
                 let found = result.output.split(whereSeparator: \.isNewline).compactMap { line -> AndroidDevice? in
-                    let text = String(line)
-                    guard !text.hasPrefix("List of devices"),
-                          let range = text.range(of: #"^([^\s]+)\s+device(?:\s|$)"#, options: .regularExpression) else { return nil }
-                    let serial = String(text[range]).split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
-                    guard !serial.isEmpty else { return nil }
-                    return AndroidDevice(serial: serial, details: text)
+                    let columns = line.split(whereSeparator: \.isWhitespace).map(String.init)
+                    guard columns.count >= 2, columns[1] == "device" else { return nil }
+                    return AndroidDevice(serial: columns[0], details: String(line))
                 }
                 self.devices = found
-                if !self.selectedSerial.isEmpty && !found.contains(where: { $0.serial == self.selectedSerial }) {
-                    self.selectedSerial = ""
-                }
-                if self.selectedSerial.isEmpty && found.count == 1 {
-                    self.selectedSerial = found[0].serial
-                }
-                self.status = found.isEmpty ? "No authorized devices found. Check the USB debugging prompt on your phone." : "\(found.count) device\(found.count == 1 ? "" : "s") ready."
+                if !found.contains(where: { $0.serial == self.selectedSerial }) { self.selectedSerial = "" }
+                if self.selectedSerial.isEmpty && found.count == 1 { self.selectedSerial = found[0].serial }
+                self.status = found.isEmpty ? "No authorized devices found. Check the USB debugging prompt." : "\(found.count) device\(found.count == 1 ? "" : "s") ready."
             }
         }
     }
 
     func start() {
         guard !isRunning else { return }
-        guard let scrcpy = Self.findExecutable(named: "scrcpy") else {
-            status = "scrcpy not found. Install it with Homebrew or set SCRCPY_BIN."
+        guard let scrcpy = runtimeExecutable("scrcpy"), let adb = runtimeExecutable("adb") else {
+            status = "Bundled scrcpy runtime is missing. Rebuild the app bundle."
             return
         }
         guard !selectedSerial.isEmpty else {
             status = "Select an authorized Android device first."
             return
         }
+        let outputFolder = URL(fileURLWithPath: (destination as NSString).expandingTildeInPath, isDirectory: true)
         if record {
-            let folder = (destination as NSString).expandingTildeInPath
             var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory), isDirectory.boolValue else {
+            guard FileManager.default.fileExists(atPath: outputFolder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
                 status = "Recording folder does not exist. Choose a valid destination in Preferences."
                 return
             }
@@ -168,32 +165,30 @@ final class AppModel: ObservableObject {
 
         let task = Process()
         task.executableURL = scrcpy
-        task.arguments = makeArguments()
+        task.arguments = makeArguments(outputFolder: outputFolder)
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         var environment = ProcessInfo.processInfo.environment
-        var paths = (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").components(separatedBy: ":")
-        for url in [scrcpy, Self.findExecutable(named: "adb")].compactMap({ $0 }) {
-            let parent = url.deletingLastPathComponent().path
-            if !paths.contains(parent) { paths.insert(parent, at: 0) }
-        }
-        environment["PATH"] = paths.joined(separator: ":")
+        environment["ADB"] = adb.path
+        environment["SCRCPY_SERVER_PATH"] = runtimeDirectory.appendingPathComponent("scrcpy-server").path
+        environment["SCRCPY_ICON_DIR"] = runtimeDirectory.path
+        environment["PATH"] = runtimeDirectory.path + ":" + (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
         task.environment = environment
         task.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async {
+            Task { @MainActor in
                 guard let self else { return }
                 self.isRunning = false
                 self.scrcpyProcess = nil
-                self.status = process.terminationStatus == 0 ? "scrcpy session ended." : "scrcpy exited with code \(process.terminationStatus). Check device connection and scrcpy installation."
+                self.status = process.terminationStatus == 0 ? "scrcpy session ended." : "scrcpy exited with code \(process.terminationStatus)."
             }
         }
         do {
             try task.run()
             scrcpyProcess = task
             isRunning = true
-            status = "Mirroring \(selectedSerial). scrcpy opens its own native video window."
+            status = "Mirroring \(selectedSerial). The video window is provided by bundled scrcpy."
         } catch {
-            status = "Could not launch scrcpy: \(error.localizedDescription)"
+            status = "Could not launch bundled scrcpy: \(error.localizedDescription)"
         }
     }
 
@@ -204,24 +199,22 @@ final class AppModel: ObservableObject {
     }
 
     func sendNavigation(_ keyCode: String) {
-        guard !selectedSerial.isEmpty, let adb = Self.findExecutable(named: "adb") else {
-            status = "Choose an authorized device before sending navigation keys."
+        guard !selectedSerial.isEmpty, let adb = runtimeExecutable("adb") else {
+            status = "Choose an authorized device first."
             return
         }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = Self.capture(adb, arguments: ["-s", self?.selectedSerial ?? "", "shell", "input", "keyevent", keyCode])
-            DispatchQueue.main.async {
-                if result.status == 0 { self?.status = "Sent Android navigation command." }
-                else { self?.status = result.output.isEmpty ? "ADB navigation command failed." : result.output }
+        let serial = selectedSerial
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let result = Self.capture(adb, arguments: ["-s", serial, "shell", "input", "keyevent", keyCode])
+            await MainActor.run {
+                self?.status = result.status == 0 ? "Sent Android navigation command." : "ADB navigation failed: \(result.output)"
             }
         }
     }
 
-    private func makeArguments() -> [String] {
-        var args = ["--serial", selectedSerial,
-                    "--max-size", String(resolution),
-                    "--video-bit-rate", String(bitrate),
-                    "--max-fps", String(fps),
+    private func makeArguments(outputFolder: URL) -> [String] {
+        var args = ["--serial", selectedSerial, "--max-size", String(resolution),
+                    "--video-bit-rate", String(bitrate), "--max-fps", String(fps),
                     "--window-title", "SGRGPY — \(selectedSerial)"]
         if !audioEnabled { args.append("--no-audio") }
         if showTouches { args.append("--show-touches") }
@@ -229,30 +222,25 @@ final class AppModel: ObservableObject {
         if !mirrorMode { args.append("--new-display") }
         if record {
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let file = URL(fileURLWithPath: (destination as NSString).expandingTildeInPath).appendingPathComponent("sgrgpy-\(stamp).mkv")
-            args += ["--record", file.path]
+            args += ["--record", outputFolder.appendingPathComponent("sgrgpy-\(stamp).mkv").path]
         }
         return args
     }
 
-    var mirrorMode = true
-
-    private static func findExecutable(named name: String) -> URL? {
-        if name == "scrcpy", let configured = ProcessInfo.processInfo.environment["SCRCPY_BIN"],
-           FileManager.default.isExecutableFile(atPath: configured) { return URL(fileURLWithPath: configured) }
-        let known = name == "adb"
-            ? ["/opt/homebrew/bin/adb", "/usr/local/bin/adb", "/opt/local/bin/adb", "/usr/bin/adb"]
-            : ["/opt/homebrew/bin/scrcpy", "/usr/local/bin/scrcpy", "/usr/local/opt/scrcpy/bin/scrcpy", "/opt/local/bin/scrcpy"]
-        for path in known where FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
-        let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-        for directory in pathValue.split(separator: ":") {
-            let path = URL(fileURLWithPath: String(directory)).appendingPathComponent(name).path
-            if FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
-        }
-        return nil
+    private var runtimeDirectory: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/scrcpy-runtime", isDirectory: true)
     }
 
-    private static func capture(_ executable: URL, arguments: [String]) -> (status: Int32, output: String) {
+    private func runtimeExecutable(_ name: String) -> URL? {
+        #if DEBUG
+        if let configured = ProcessInfo.processInfo.environment[name == "scrcpy" ? "SCRCPY_BIN" : "ADB"],
+           FileManager.default.isExecutableFile(atPath: configured) { return URL(fileURLWithPath: configured) }
+        #endif
+        let bundled = runtimeDirectory.appendingPathComponent(name)
+        return FileManager.default.isExecutableFile(atPath: bundled.path) ? bundled : nil
+    }
+
+    nonisolated private static func capture(_ executable: URL, arguments: [String]) -> (status: Int32, output: String) {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = executable
@@ -310,15 +298,13 @@ struct MainView: View {
                     parameterCard
                     optionsCard
                     HStack {
-                        Button(action: { showPreferences = true }) { Label("Preferences", systemImage: "slider.horizontal.3") }
+                        Button { showPreferences = true } label: { Label("Preferences", systemImage: "slider.horizontal.3") }
                             .buttonStyle(.bordered)
                         Spacer()
-                        Button(action: { model.isRunning ? model.stop() : model.start() }) {
-                            Label(model.isRunning ? "Stop mirroring" : "Start mirroring", systemImage: model.isRunning ? "stop.fill" : "play.fill")
-                                .frame(minWidth: 145)
+                        Button { model.isRunning ? model.stop() : model.start() } label: {
+                            Label(model.isRunning ? "Stop mirroring" : "Start mirroring", systemImage: model.isRunning ? "stop.fill" : "play.fill").frame(minWidth: 145)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(Color.accentColor)
                     }
                 }
                 .frame(width: 350)
@@ -333,9 +319,7 @@ struct MainView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Image(systemName: "rectangle.on.rectangle")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+            Image(systemName: "rectangle.on.rectangle").font(.system(size: 20, weight: .semibold)).foregroundStyle(Color.accentColor)
             VStack(alignment: .leading, spacing: 2) {
                 Text("SGRGPY").font(.system(size: 16, weight: .bold, design: .rounded))
                 Text("gui the f outta scrcpy").font(.caption).foregroundStyle(.secondary)
@@ -343,36 +327,26 @@ struct MainView: View {
             Spacer()
             if model.isRefreshing { ProgressView().controlSize(.small) }
             Button { model.refreshDevices() } label: { Label("Refresh devices", systemImage: "arrow.clockwise") }
-                .buttonStyle(.bordered)
-                .disabled(model.isRefreshing)
+                .buttonStyle(.bordered).disabled(model.isRefreshing)
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 16)
-        .background(.bar)
+        .padding(.horizontal, 22).padding(.vertical, 16).background(.bar)
     }
 
     private var preview: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Label(model.mirrorMode ? "Device mirror" : "Extended display", systemImage: model.mirrorMode ? "iphone" : "macbook.and.iphone")
-                    .font(.headline)
+                Label(model.mirrorMode ? "Device mirror" : "Extended display", systemImage: model.mirrorMode ? "iphone" : "macbook.and.iphone").font(.headline)
                 Spacer()
                 Circle().fill(model.isRunning ? Color.green : Color.secondary.opacity(0.5)).frame(width: 8, height: 8)
                 Text(model.isRunning ? "Running" : "Not started").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Image(systemName: "iphone.gen3")
-                .font(.system(size: 74, weight: .ultraLight))
-                .foregroundStyle(.secondary.opacity(0.55))
-            Text(model.selectedSerial.isEmpty ? "Select an Android device to begin" : model.selectedSerial)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text("The live video appears in scrcpy’s own native window.")
-                .font(.caption).foregroundStyle(.tertiary)
+            Image(systemName: "iphone.gen3").font(.system(size: 74, weight: .ultraLight)).foregroundStyle(.secondary.opacity(0.55))
+            Text(model.selectedSerial.isEmpty ? "Select an Android device to begin" : model.selectedSerial).font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
+            Text("The live video is displayed in scrcpy’s native window.").font(.caption).foregroundStyle(.tertiary)
             Spacer()
         }
-        .frame(maxWidth: .infinity, minHeight: 380)
-        .padding(20)
+        .frame(maxWidth: .infinity, minHeight: 380).padding(20)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.secondary.opacity(0.15)))
     }
@@ -386,12 +360,8 @@ struct MainView: View {
     }
 
     private func navButton(_ title: String, icon: String, key: String) -> some View {
-        Button { model.sendNavigation(key) } label: {
-            Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 38)
-        }
-        .buttonStyle(.bordered)
-        .disabled(model.selectedSerial.isEmpty)
-        .help("Send Android \(title) key using ADB")
+        Button { model.sendNavigation(key) } label: { Label(title, systemImage: icon).frame(maxWidth: .infinity, minHeight: 38) }
+            .buttonStyle(.bordered).disabled(model.selectedSerial.isEmpty).help("Send Android \(title) key")
     }
 
     private var devicePicker: some View {
@@ -399,30 +369,22 @@ struct MainView: View {
             Text("DEVICE").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
             Picker("Android device", selection: $model.selectedSerial) {
                 Text("Choose a device…").tag("")
-                ForEach(model.devices) { device in
-                    Text(device.serial).tag(device.serial)
-                }
+                ForEach(model.devices) { device in Text(device.serial).tag(device.serial) }
             }
-            .labelsHidden()
-            .disabled(model.devices.isEmpty)
-            if model.devices.isEmpty {
-                Text("Enable USB debugging, accept the prompt, then refresh.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+            .labelsHidden().disabled(model.devices.isEmpty)
+            if model.devices.isEmpty { Text("Enable USB debugging, accept the prompt, then refresh.").font(.caption).foregroundStyle(.secondary) }
         }
-        .padding(14)
-        .background(cardBackground)
+        .padding(14).background(cardBackground)
     }
 
     private var parameterCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Stream quality").font(.headline)
-            parameter("Resolution", value: $model.resolution, range: 240...2160, step: 30, suffix: " px")
-            parameter("Bitrate", value: $model.bitrate, range: 1_000_000...40_000_000, step: 1_000_000, suffix: " bps")
-            parameter("Frame rate", value: $model.fps, range: 15...120, step: 1, suffix: " fps")
+            parameter("Resolution", value: $model.resolution, range: 240...2160, step: 30, suffix: "px")
+            parameter("Bitrate", value: $model.bitrate, range: 1_000_000...40_000_000, step: 1_000_000, suffix: "bps")
+            parameter("Frame rate", value: $model.fps, range: 15...120, step: 1, suffix: "fps")
         }
-        .padding(14)
-        .background(cardBackground)
+        .padding(14).background(cardBackground)
     }
 
     private func parameter(_ title: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int, suffix: String) -> some View {
@@ -430,42 +392,33 @@ struct MainView: View {
             HStack {
                 Text(title).font(.subheadline)
                 Spacer()
-                TextField(title, value: value, format: .number.grouping(.never))
-                    .frame(width: 88)
-                    .multilineTextAlignment(.trailing)
-                    .textFieldStyle(.roundedBorder)
-                Text(suffix).font(.caption).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
+                TextField(title, value: value, format: .number.grouping(.never)).frame(width: 88).multilineTextAlignment(.trailing).textFieldStyle(.roundedBorder)
+                Text(suffix).font(.caption).foregroundStyle(.secondary).frame(width: 34, alignment: .leading)
             }
-            Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Int($0.rounded()) }), in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step))
-                .tint(Color.accentColor)
+            Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Int($0.rounded()) }), in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step)).tint(Color.accentColor)
         }
     }
 
     private var optionsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Options").font(.headline)
+            Toggle("Mirror device screen", isOn: $model.mirrorMode)
             Toggle("Audio", isOn: $model.audioEnabled)
             Toggle("Show touches", isOn: $model.showTouches)
             Toggle("Keep device awake", isOn: $model.stayAwake)
             Toggle("Record session", isOn: $model.record)
         }
-        .toggleStyle(.switch)
-        .padding(14)
-        .background(cardBackground)
+        .toggleStyle(.switch).padding(14).background(cardBackground)
     }
 
     private var statusBar: some View {
         HStack(spacing: 8) {
-            Image(systemName: model.isRunning ? "circle.fill" : "info.circle")
-                .foregroundStyle(model.isRunning ? .green : .secondary)
+            Image(systemName: model.isRunning ? "circle.fill" : "info.circle").foregroundStyle(model.isRunning ? .green : .secondary)
             Text(model.status).lineLimit(1)
             Spacer()
-            Text("macOS 12+").foregroundStyle(.tertiary)
+            Text("Bundled scrcpy 5.0.1").foregroundStyle(.tertiary)
         }
-        .font(.caption)
-        .padding(.horizontal, 22)
-        .padding(.vertical, 10)
-        .background(.bar)
+        .font(.caption).padding(.horizontal, 22).padding(.vertical, 10).background(.bar)
     }
 
     private var cardBackground: some View {
@@ -477,13 +430,14 @@ struct MainView: View {
 struct PreferencesView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var profileName = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Preferences").font(.title2.bold())
-                    Text("Tune the app and manage your presets.").font(.subheadline).foregroundStyle(.secondary)
+                    Text("Appearance, recording destination, and presets.").font(.subheadline).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
@@ -508,8 +462,7 @@ struct PreferencesView: View {
                             panel.begin { if $0 == .OK, let url = panel.url { model.destination = url.path } }
                         }
                     }
-                    Text("Recording files are saved here as MKV. This folder does not change ADB pull behavior.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Recording files are MKV. This setting does not affect ADB pull.").font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Presets") {
                     ForEach(model.profiles) { profile in
@@ -521,18 +474,19 @@ struct PreferencesView: View {
                             }
                             Spacer()
                             Button("Apply") { model.apply(profile) }
-                            Button(role: .destructive) { model.profiles.removeAll { $0.id == profile.id } } label: {
-                                Image(systemName: "trash")
-                            }
-                            .help("Delete preset")
+                            Button(role: .destructive) { model.profiles.removeAll { $0.id == profile.id } } label: { Image(systemName: "trash") }
+                                .help("Delete preset")
                         }
                     }
-                    Button { model.saveProfile() } label: { Label("Save current settings as preset", systemImage: "plus") }
+                    HStack {
+                        TextField("Preset name", text: $profileName)
+                        Button { model.saveProfile(name: profileName); profileName = "" } label: { Label("Save current", systemImage: "plus") }
+                            .disabled(profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
                 }
             }
             .formStyle(.grouped)
         }
-        .padding(22)
-        .frame(width: 560, height: 560)
+        .padding(22).frame(width: 560, height: 560)
     }
 }
