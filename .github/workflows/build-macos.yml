@@ -1,0 +1,49 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Package.swift'
+      - 'Sources/**'
+      - 'scripts/**'
+      - 'vendor/scrcpy/**'
+      - 'build_app.sh'
+      - '.github/workflows/build-macos.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-intel:
+    name: Build unsigned Intel macOS app
+    runs-on: macos-15-intel
+    steps:
+      - name: Check out source and vendored runtime
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcode-select -p
+          uname -m
+
+      - name: Build app bundle (offline runtime)
+        run: bash ./build_app.sh
+
+      - name: Create downloadable archive
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent SGRGPY.app SGRGPY-macos-intel.zip
+          shasum -a 256 SGRGPY-macos-intel.zip > SGRGPY-macos-intel.zip.sha256
+
+      - name: Upload app bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SGRGPY-macos-intel
+          path: |
+            dist/SGRGPY-macos-intel.zip
+            dist/SGRGPY-macos-intel.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
