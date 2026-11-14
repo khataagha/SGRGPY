@@ -46,6 +46,21 @@ Official SHA-256:
 
 The bundle is unsigned unless `CODE_SIGN_IDENTITY` is set to a valid Developer ID Application certificate. Signing and notarization require the developer’s Apple credentials.
 
+## Build with GitHub Actions (no local Xcode install)
+
+You can build an unsigned Intel `.app` using GitHub's hosted macOS runner from the browser:
+
+1. Open the repository's **Actions** tab.
+2. Select **Build macOS app** in the workflow list.
+3. Choose **Run workflow** on the `main` branch.
+4. Open the completed run and download the `SGRGPY-macos-intel` artifact.
+5. Unzip it and move `SGRGPY.app` to Applications.
+
+The workflow runs on a GitHub-hosted Intel macOS runner, verifies the checked-in scrcpy archive, builds and bundles the app, and uploads a 7-day artifact. Since the repository is public, standard hosted Actions usage is free under GitHub's current policy; artifact storage/retention limits still apply. The uploaded build is unsigned and intended for personal testing. GitHub Actions cannot sign/notarize it without Apple Developer signing credentials.
+
+The workflow currently targets Intel Macs to match the vendored x86_64 scrcpy runtime and the mid-2015 MacBook Pro. An Apple Silicon build requires adding the matching aarch64 archive and a separate runner job.
+
+
 ## Run
 
 1. Connect the Android device and enable USB debugging.
