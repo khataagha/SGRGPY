@@ -11,7 +11,8 @@ VERSION="5.0.1"
 case "$ARCH" in
   amd64|x86_64)
     ARCH="x86_64"
-    SHA256="31a5467a9e907f162b093dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d"
+    # Official scrcpy v5.0.1 macOS x86_64 release SHA-256.
+    SHA256="31a5467a9e907f162b093dbcbab1276b15c6e709c2ea8159566a8d165beb50"
     ;;
   arm64|aarch64)
     ARCH="aarch64"
