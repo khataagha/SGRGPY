@@ -1,26 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build SGRGPY and bundle the locally vendored official scrcpy macOS archive.
-# No network access is used. Add one verified archive per supported CPU arch.
+# Build SGRGPY and bundle only the checked-in official scrcpy archive.
+# This script makes no network requests.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SGRGPY"
 SCRCPY_VERSION="5.0.1"
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "Run this packaging script on macOS." >&2; exit 1; }
 command -v swift >/dev/null || { echo "Swift is required; install Xcode Command Line Tools." >&2; exit 1; }
-command -v tar >/dev/null || { echo "tar is required." >&2; exit 1; }
-command -v shasum >/dev/null || { echo "shasum is required." >&2; exit 1; }
+command -v ditto >/dev/null || { echo "ditto is required." >&2; exit 1; }
 
 case "$(uname -m)" in
-  x86_64|amd64)
-    ARCH="x86_64"
-    SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
-    ;;
-  arm64|aarch64)
-    ARCH="aarch64"
-    SHA256="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
-    ;;
+  x86_64|amd64) ARCH="x86_64" ;;
+  arm64|aarch64) ARCH="aarch64" ;;
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -28,29 +21,15 @@ ARCHIVE="$ROOT/vendor/scrcpy/scrcpy-macos-${ARCH}-v${SCRCPY_VERSION}.tar.gz"
 if [[ ! -f "$ARCHIVE" ]]; then
   echo "Vendored scrcpy archive not found: $ARCHIVE" >&2
   if [[ "$ARCH" == "aarch64" ]]; then
-    echo "This repository currently vendors only the x86_64 archive. Add the official aarch64 v${SCRCPY_VERSION} archive and checksum before building on Apple Silicon." >&2
+    echo "Only the x86_64 archive is currently in this repository. Add the official aarch64 v${SCRCPY_VERSION} archive before building on Apple Silicon." >&2
   fi
-  exit 1
-fi
-
-ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
-if [[ "$ACTUAL_SHA" != "$SHA256" ]]; then
-  echo "SHA-256 mismatch for $ARCHIVE" >&2
-  echo "Expected: $SHA256" >&2
-  echo "Actual:   $ACTUAL_SHA" >&2
   exit 1
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sgrgpy-bundle.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/extracted"
-tar -xzf "$ARCHIVE" -C "$WORK/extracted"
-SCRCPY_BIN="$(find "$WORK/extracted" -type f -name scrcpy -print -quit)"
-[[ -n "$SCRCPY_BIN" ]] || { echo "Archive is missing scrcpy." >&2; exit 1; }
-RUNTIME="$(dirname "$SCRCPY_BIN")"
-[[ -x "$RUNTIME/scrcpy" ]] || { echo "scrcpy is not executable in the vendored archive." >&2; exit 1; }
-[[ -x "$RUNTIME/adb" ]] || { echo "Archive is missing executable adb." >&2; exit 1; }
-[[ -f "$RUNTIME/scrcpy-server" ]] || { echo "Archive is missing the matching scrcpy-server." >&2; exit 1; }
+RUNTIME="$WORK/runtime"
+bash "$ROOT/scripts/fetch_scrcpy.sh" "$ARCH" "$RUNTIME"
 
 swift build --package-path "$ROOT" --configuration release
 BINARY="$ROOT/.build/release/$APP_NAME"
@@ -59,7 +38,7 @@ BINARY="$ROOT/.build/release/$APP_NAME"
 STAGE="$WORK/$APP_NAME.app"
 mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources/runtime"
 install -m 755 "$BINARY" "$STAGE/Contents/MacOS/$APP_NAME"
-# Preserve all official runtime resources and upstream license/notice files.
+# Preserve official runtime data and all license/notice files in the release archive.
 ditto "$RUNTIME" "$STAGE/Contents/Resources/runtime"
 chmod +x "$STAGE/Contents/Resources/runtime/scrcpy" "$STAGE/Contents/Resources/runtime/adb"
 
