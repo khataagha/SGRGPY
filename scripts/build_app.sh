@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build SGRGPY and bundle the official, version-pinned scrcpy macOS static
-# distribution (scrcpy, adb, server JAR, support assets and upstream license).
-# The official binaries are downloaded at build time; they are not checked in.
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Build SGRGPY and bundle the locally vendored official scrcpy macOS archive.
+# No network access is used. Add one verified archive per supported CPU arch.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="SGRGPY"
-SCRCPY_VERSION="${SCRCPY_VERSION:-5.0.1}"
+SCRCPY_VERSION="5.0.1"
 
-case "${SCRCPY_ARCH:-$(uname -m)}" in
+[[ "$(uname -s)" == "Darwin" ]] || { echo "Run this packaging script on macOS." >&2; exit 1; }
+command -v swift >/dev/null || { echo "Swift is required; install Xcode Command Line Tools." >&2; exit 1; }
+command -v tar >/dev/null || { echo "tar is required." >&2; exit 1; }
+command -v shasum >/dev/null || { echo "shasum is required." >&2; exit 1; }
+
+case "$(uname -m)" in
   x86_64|amd64)
     ARCH="x86_64"
     SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
@@ -20,47 +24,46 @@ case "${SCRCPY_ARCH:-$(uname -m)}" in
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-[[ "$(uname -s)" == Darwin ]] || { echo "Run this packaging script on macOS." >&2; exit 1; }
-command -v swift >/dev/null || { echo "Swift is required; install Xcode Command Line Tools." >&2; exit 1; }
-command -v curl >/dev/null || { echo "curl is required." >&2; exit 1; }
-command -v tar >/dev/null || { echo "tar is required." >&2; exit 1; }
-
-ASSET="scrcpy-macos-${ARCH}-v${SCRCPY_VERSION}.tar.gz"
-URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/${ASSET}"
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/sgrgpy.XXXXXX")"
-trap 'rm -rf "$WORK_DIR"' EXIT
-ARCHIVE="$WORK_DIR/$ASSET"
-
-printf 'Downloading official scrcpy %s for macOS %s…\n' "$SCRCPY_VERSION" "$ARCH"
-curl --fail --location --retry 3 --output "$ARCHIVE" "$URL"
-ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
-[[ "$ACTUAL_SHA" == "$SHA256" ]] || {
-  echo "SHA-256 mismatch for $ASSET" >&2
-  echo "expected $SHA256" >&2
-  echo "actual   $ACTUAL_SHA" >&2
+ARCHIVE="$ROOT/vendor/scrcpy/scrcpy-macos-${ARCH}-v${SCRCPY_VERSION}.tar.gz"
+if [[ ! -f "$ARCHIVE" ]]; then
+  echo "Vendored scrcpy archive not found: $ARCHIVE" >&2
+  if [[ "$ARCH" == "aarch64" ]]; then
+    echo "This repository currently vendors only the x86_64 archive. Add the official aarch64 v${SCRCPY_VERSION} archive and checksum before building on Apple Silicon." >&2
+  fi
   exit 1
-}
+fi
 
-mkdir -p "$WORK_DIR/extracted"
-tar -xzf "$ARCHIVE" -C "$WORK_DIR/extracted"
-RUNTIME_DIR="$(find "$WORK_DIR/extracted" -type f -name scrcpy -print -quit | xargs dirname)"
-[[ -n "$RUNTIME_DIR" && -x "$RUNTIME_DIR/scrcpy" ]] || { echo "Official archive did not contain scrcpy." >&2; exit 1; }
-[[ -x "$RUNTIME_DIR/adb" ]] || { echo "Official archive did not contain executable adb." >&2; exit 1; }
-[[ -f "$RUNTIME_DIR/scrcpy-server" ]] || { echo "Official archive did not contain scrcpy-server." >&2; exit 1; }
+ACTUAL_SHA="$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')"
+if [[ "$ACTUAL_SHA" != "$SHA256" ]]; then
+  echo "SHA-256 mismatch for $ARCHIVE" >&2
+  echo "Expected: $SHA256" >&2
+  echo "Actual:   $ACTUAL_SHA" >&2
+  exit 1
+fi
 
-swift build --package-path "$ROOT_DIR" --configuration release
-BINARY="$ROOT_DIR/.build/release/$APP_NAME"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/sgrgpy-bundle.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+mkdir -p "$WORK/extracted"
+tar -xzf "$ARCHIVE" -C "$WORK/extracted"
+SCRCPY_BIN="$(find "$WORK/extracted" -type f -name scrcpy -print -quit)"
+[[ -n "$SCRCPY_BIN" ]] || { echo "Archive is missing scrcpy." >&2; exit 1; }
+RUNTIME="$(dirname "$SCRCPY_BIN")"
+[[ -x "$RUNTIME/scrcpy" ]] || { echo "scrcpy is not executable in the vendored archive." >&2; exit 1; }
+[[ -x "$RUNTIME/adb" ]] || { echo "Archive is missing executable adb." >&2; exit 1; }
+[[ -f "$RUNTIME/scrcpy-server" ]] || { echo "Archive is missing the matching scrcpy-server." >&2; exit 1; }
+
+swift build --package-path "$ROOT" --configuration release
+BINARY="$ROOT/.build/release/$APP_NAME"
 [[ -x "$BINARY" ]] || { echo "Swift build did not produce $BINARY" >&2; exit 1; }
 
-APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME-${ARCH}.app"
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources/scrcpy-runtime"
-install -m 755 "$BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-# Copy the complete upstream distribution, retaining its support files and license.
-cp -R "$RUNTIME_DIR/." "$APP_BUNDLE/Contents/Resources/scrcpy-runtime/"
-chmod +x "$APP_BUNDLE/Contents/Resources/scrcpy-runtime/scrcpy" "$APP_BUNDLE/Contents/Resources/scrcpy-runtime/adb"
+STAGE="$WORK/$APP_NAME.app"
+mkdir -p "$STAGE/Contents/MacOS" "$STAGE/Contents/Resources/runtime"
+install -m 755 "$BINARY" "$STAGE/Contents/MacOS/$APP_NAME"
+# Preserve all official runtime resources and upstream license/notice files.
+ditto "$RUNTIME" "$STAGE/Contents/Resources/runtime"
+chmod +x "$STAGE/Contents/Resources/runtime/scrcpy" "$STAGE/Contents/Resources/runtime/adb"
 
-cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
+cat > "$STAGE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -75,15 +78,19 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
 
+OUT="$ROOT/dist"
+mkdir -p "$OUT"
+APP="$OUT/$APP_NAME.app"
+rm -rf "$APP"
+ditto "$STAGE" "$APP"
 if [[ -n "${CODE_SIGN_IDENTITY:-}" ]]; then
-  codesign --force --deep --options runtime --sign "$CODE_SIGN_IDENTITY" "$APP_BUNDLE"
+  codesign --force --deep --options runtime --sign "$CODE_SIGN_IDENTITY" "$APP"
 else
-  echo "Note: app is unsigned. Set CODE_SIGN_IDENTITY to sign it for distribution."
+  echo "Warning: app is unsigned. Set CODE_SIGN_IDENTITY to a valid Developer ID identity to sign it."
 fi
 
-echo "Built all-in-one app: $APP_BUNDLE"
-echo "Bundled runtime: scrcpy $SCRCPY_VERSION, $ARCH (scrcpy + adb + scrcpy-server + upstream support files)"
+echo "Built all-in-one app: $APP"
+echo "Bundled local scrcpy v${SCRCPY_VERSION} runtime ($ARCH): scrcpy, adb, server and upstream resources."
